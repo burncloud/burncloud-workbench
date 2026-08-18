@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from .graph import graph, initial_state
+from burncloud_ui_rebuild.graph import build_graph, initial_state
 
 
 def main() -> None:
@@ -17,6 +18,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "dry-run":
+        graph = build_graph(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": args.thread_id}}
         result = graph.invoke(
             initial_state(execution_mode="dry_run", thread_id=args.thread_id),

@@ -1,10 +1,65 @@
 # BurnCloud Workbench
 
-BurnCloud Workbench is the product, UI, architecture and agent-engineering workspace for BurnCloud.
+`burncloud-workbench` 是 BurnCloud 的产品、UI、Graph/Agent 和架构设计工作台。
 
-## Current areas
+这里允许存放尚未进入生产仓库的目标规范、Page Contract、RFC、实验和设计决策。**Workbench 文档不是 `burncloud/burncloud` 当前运行事实。**
 
-- `docs/ui/` — approved target UI product standards, information architecture and page contracts.
-- `graphs/ui-rebuild/` — executable LangGraph harness for rebuilding the Buyer / Supplier / Admin console from those contracts.
+## Current Work
 
-The Workbench contains target truth and experiments. Production behavior remains defined by the real `burncloud/burncloud` source until approved work is implemented and verified there.
+### UI / Product
+
+从 [`docs/ui/README.md`](docs/ui/README.md) 开始。
+
+当前已经建立：
+
+- Product & UI Standard
+- Information Architecture
+- Buyer / Supplier / Admin Page Contracts
+- Design System
+- Interaction Rules
+- Content Standard
+- UI Review Checklist
+- UI Agent / Graph Execution Protocol
+
+### LangGraph / Agent Engineering
+
+第一版可执行 UI 重建 Harness 位于：
+
+- [`graphs/ui-rebuild/`](graphs/ui-rebuild/) — BurnCloud Buyer / Supplier / Admin 全量 UI 重建 Graph。
+
+当前 v0.1 先以 `dry_run` 验证 Graph、权限不变量、25 个页面任务、Review/Fix Loop 和 Human Gate；不会修改 `burncloud/burncloud`。
+
+## Truth Labels
+
+文档应明确 truth 类型，例如：
+
+- `truth: target` — 已批准或拟议的目标产品行为，不代表当前已实现
+- `truth: source-derived` — 基于当前真实源码/可执行 Gate 验证的文档（更适合生产仓库）
+
+不要因为 Workbench 写了目标，就在实现报告里声称功能已经存在。
+
+## Promotion Rule
+
+当某项设计满足以下条件时，才考虑迁移到 `burncloud/burncloud`：
+
+1. 产品决策已批准；
+2. 对应实现进入开发/已经实现；
+3. 与当前 source/runtime truth 完成核对；
+4. 可执行测试或 Gate 已覆盖关键不变量；
+5. 文档 truth/status 标签不会误导 Agent。
+
+## Repository Direction
+
+建议后续目录按主题扩展：
+
+```text
+docs/
+├── ui/
+├── product/
+├── architecture/
+├── graphs/
+├── rfcs/
+└── research/
+```
+
+确认后的长期真相最终应回到主仓库；Workbench 负责让想法在进入主仓库之前先变得清楚、可审查、可执行。

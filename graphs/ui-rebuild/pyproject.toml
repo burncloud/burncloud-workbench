@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "burncloud-ui-rebuild"
+version = "0.1.0"
+description = "LangGraph harness for rebuilding the BurnCloud Buyer, Supplier and Admin console."
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=1.1,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+burncloud-ui-rebuild = "burncloud_ui_rebuild.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/burncloud_ui_rebuild"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

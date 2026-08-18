@@ -38,14 +38,50 @@ workspace/
 └── burncloud-workbench/
 ```
 
-然后：
+### 1. 创建虚拟环境并安装
 
-```bash
-cd burncloud-workbench/graphs/ui-rebuild
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+Windows CMD：
+
+```bat
+cd burncloud-workbench\graphs\ui-rebuild
+py -3.13 -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install -e ".[dev]"
+python -m pip install -U "langgraph-cli[inmem]"
+```
+
+### 2. 配置本地环境变量
+
+真实密钥只放本机 `.env`，不要提交到 Git。
+
+```bat
+copy .env.example .env
+```
+
+`.env` 只使用三个参数：
+
+```env
+API_KEY=xxxxxxxx
+BASE_URL=http://127.0.0.1:8080/v1
+LANGSMITH_API_KEY=xxxxxxxx
+```
+
+- `API_KEY`：Agent 模型端点使用的 Key。
+- `BASE_URL`：OpenAI-compatible 模型端点。
+- `LANGSMITH_API_KEY`：LangGraph Studio / LangSmith 使用的 Key。
+
+`model_factory.py` 统一读取这些变量。Agent 的模型名称由调用方传入，不增加第四个环境变量。
+
+### 3. 运行测试和 LangGraph
+
+```bat
 pytest
+langgraph dev
+```
+
+也可以直接运行当前 dry-run：
+
+```bat
 burncloud-ui-rebuild dry-run
 ```
 

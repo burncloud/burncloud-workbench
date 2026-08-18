@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from .config import source_root, workbench_root
-from .nodes import (
+from burncloud_ui_rebuild.config import source_root, workbench_root
+from burncloud_ui_rebuild.nodes import (
     architecture_agent,
     final_permission_check,
     human_gate,
@@ -15,8 +14,8 @@ from .nodes import (
     select_next_page,
     spec_agent,
 )
-from .page_graph import build_page_graph
-from .state import UIRebuildState
+from burncloud_ui_rebuild.page_graph import build_page_graph
+from burncloud_ui_rebuild.state import UIRebuildState
 
 
 def _page_router(state: UIRebuildState) -> str:
@@ -85,5 +84,5 @@ def initial_state(*, execution_mode: str = "dry_run", thread_id: str = "burnclou
     }
 
 
-# Development/Studio graph. Production should use a durable SQLite/Postgres checkpointer.
-graph = build_graph(checkpointer=InMemorySaver())
+# Exported Agent Server / Studio graph. Agent Server injects persistence at runtime.
+graph = build_graph()

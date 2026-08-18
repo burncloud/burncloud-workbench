@@ -2,6 +2,5 @@
   "dependencies": ["."],
   "graphs": {
     "burncloud_ui_rebuild": "./src/burncloud_ui_rebuild/graph.py:graph"
-  },
-  "env": ".env"
+  }
 }

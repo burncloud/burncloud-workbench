@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from burncloud_ui_rebuild.config import DEFAULT_EXECUTION_MODE, DEFAULT_MODEL_NAME, source_root, workbench_root
+from burncloud_ui_rebuild.engineering_nodes import initialize_run_context, recovery_node
 from burncloud_ui_rebuild.nodes import (
     architecture_agent,
     bootstrap,
@@ -25,13 +26,15 @@ from burncloud_ui_rebuild.state import UIRebuildState
 NODE_DEFAULT_MODE = "默认执行模式"
 NODE_BOOTSTRAP = "初始化"
 NODE_SPEC = "读取规范"
-NODE_SCOUT = "代码侦察"
+NODE_SCOUT = "仓库侦察"
 NODE_PERMISSION = "权限守卫"
 NODE_WORKTREE = "创建开发分支"
 NODE_PREFLIGHT = "写入预检"
+NODE_RUN_CONTEXT = "运行上下文"
+NODE_RECOVERY = "恢复检查"
 NODE_ARCHITECTURE = "架构规划"
 NODE_SELECT_PAGE = "选择下一页"
-NODE_PAGE_REBUILD = "页面重建"
+NODE_PAGE_REBUILD = "页面工程"
 NODE_PAGE_CHECKPOINT = "页面检查点"
 NODE_MARK_COMPLETE = "标记页面完成"
 NODE_FINAL_PERMISSION = "最终权限检查"
@@ -40,7 +43,6 @@ NODE_RELEASE = "发布"
 
 
 def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
-    """Default Studio/Agent Server runs to live write mode and one page unless overridden."""
     return {
         "execution_mode": state.get("execution_mode", DEFAULT_EXECUTION_MODE),
         "page_limit": state.get("page_limit", DEFAULT_POLICY.default_page_limit),
@@ -49,13 +51,20 @@ def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
 
 
 def _page_router(state: UIRebuildState) -> str:
-    return "最终检查" if state.get("current_page") is None else "重建页面"
+    return "最终检查" if state.get("current_page") is None else "工程页面"
 
 
 def _after_page_rebuild(state: UIRebuildState) -> str:
-    if state.get("current_page_status") in {"fix_exhausted", "fix_blocked", "builder_blocked"}:
-        return "人工介入"
-    return "页面通过"
+    blocked_statuses = {
+        "scout_blocked",
+        "plan_blocked",
+        "plan_rejected",
+        "builder_blocked",
+        "budget_exhausted",
+        "fix_exhausted",
+        "fix_blocked",
+    }
+    return "人工介入" if state.get("current_page_status") in blocked_statuses else "页面通过"
 
 
 def _human_router(state: UIRebuildState) -> str:
@@ -73,6 +82,8 @@ def build_graph(checkpointer=None):
     builder.add_node(NODE_PERMISSION, permission_guardian)
     builder.add_node(NODE_WORKTREE, prepare_worktree)
     builder.add_node(NODE_PREFLIGHT, write_preflight)
+    builder.add_node(NODE_RUN_CONTEXT, initialize_run_context)
+    builder.add_node(NODE_RECOVERY, recovery_node)
     builder.add_node(NODE_ARCHITECTURE, architecture_agent)
     builder.add_node(NODE_SELECT_PAGE, select_next_page)
     builder.add_node(NODE_PAGE_REBUILD, page_rebuild)
@@ -89,24 +100,20 @@ def build_graph(checkpointer=None):
     builder.add_edge(NODE_SCOUT, NODE_PERMISSION)
     builder.add_edge(NODE_PERMISSION, NODE_WORKTREE)
     builder.add_edge(NODE_WORKTREE, NODE_PREFLIGHT)
-    builder.add_edge(NODE_PREFLIGHT, NODE_ARCHITECTURE)
+    builder.add_edge(NODE_PREFLIGHT, NODE_RUN_CONTEXT)
+    builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY)
+    builder.add_edge(NODE_RECOVERY, NODE_ARCHITECTURE)
     builder.add_edge(NODE_ARCHITECTURE, NODE_SELECT_PAGE)
 
     builder.add_conditional_edges(
         NODE_SELECT_PAGE,
         _page_router,
-        {
-            "重建页面": NODE_PAGE_REBUILD,
-            "最终检查": NODE_FINAL_PERMISSION,
-        },
+        {"工程页面": NODE_PAGE_REBUILD, "最终检查": NODE_FINAL_PERMISSION},
     )
     builder.add_conditional_edges(
         NODE_PAGE_REBUILD,
         _after_page_rebuild,
-        {
-            "页面通过": NODE_PAGE_CHECKPOINT,
-            "人工介入": NODE_FINAL_PERMISSION,
-        },
+        {"页面通过": NODE_PAGE_CHECKPOINT, "人工介入": NODE_FINAL_PERMISSION},
     )
     builder.add_edge(NODE_PAGE_CHECKPOINT, NODE_MARK_COMPLETE)
     builder.add_edge(NODE_MARK_COMPLETE, NODE_SELECT_PAGE)
@@ -124,9 +131,11 @@ def build_graph(checkpointer=None):
 def initial_state(
     *,
     execution_mode: str = DEFAULT_EXECUTION_MODE,
-    thread_id: str = "burncloud-ui-rebuild-v0.4",
+    thread_id: str = "burncloud-graph-engineering-v1",
     model_name: str = DEFAULT_MODEL_NAME,
     page_limit: int | None = DEFAULT_POLICY.default_page_limit,
+    recovery_target_commit: str = "",
+    recovery_confirmed: bool = False,
 ) -> UIRebuildState:
     base_repo = str(source_root())
     state: UIRebuildState = {
@@ -141,13 +150,22 @@ def initial_state(
         "completed_pages": [],
         "implementation_results": [],
         "page_checkpoint_history": [],
+        "invocation_history": [],
+        "budget_usage": {},
+        "run_context": {},
+        "page_context": {},
         "warnings": [],
         "phase": "start",
     }
     if page_limit is not None:
         state["page_limit"] = page_limit
+    if recovery_target_commit:
+        state["recovery_request"] = {
+            "target_commit": recovery_target_commit,
+            "confirmed": recovery_confirmed,
+        }
     return state
 
 
-# Exported Agent Server / Studio graph. Agent Server injects persistence at runtime.
+# Agent Server / Studio injects persistence at runtime.
 graph = build_graph()

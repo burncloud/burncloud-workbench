@@ -16,6 +16,12 @@ def _after_review(state: UIRebuildState) -> str:
     return "完成" if not state.get("review_findings") else "修复"
 
 
+def _after_fix(state: UIRebuildState) -> str:
+    if state.get("current_page_status") in {"fix_exhausted", "fix_blocked"}:
+        return "人工介入"
+    return "重新验证"
+
+
 def build_page_graph():
     builder = StateGraph(UIRebuildState)
     builder.add_node(PAGE_NODE_BUILDER, builder_agent)
@@ -31,5 +37,9 @@ def build_page_graph():
         _after_review,
         {"完成": END, "修复": PAGE_NODE_FIXER},
     )
-    builder.add_edge(PAGE_NODE_FIXER, PAGE_NODE_VERIFIER)
+    builder.add_conditional_edges(
+        PAGE_NODE_FIXER,
+        _after_fix,
+        {"重新验证": PAGE_NODE_VERIFIER, "人工介入": END},
+    )
     return builder.compile()

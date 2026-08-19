@@ -19,7 +19,6 @@ def _changed_files(state: UIRebuildState) -> list[str]:
 
 
 def code_verifier(state: UIRebuildState) -> dict[str, Any]:
-    """Deterministic code-level gate owned entirely by HarnessPolicy."""
     page = state.get("current_page")
     findings = list(state.get("verification_findings", []))
     results: list[dict[str, Any]] = []
@@ -27,35 +26,18 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
         return {"verification_findings": findings, "validation_results": results}
 
     if not (page["route"] == "/console" or page["route"].startswith("/console/")):
-        findings.append(Finding(
-            severity="blocker",
-            code="CONSOLE_NAMESPACE",
-            message="Management page escaped /console namespace.",
-            evidence=page["route"],
-            expected="/console/*",
-        ))
+        findings.append(Finding(severity="blocker", code="CONSOLE_NAMESPACE", message="Management page escaped /console namespace.", evidence=page["route"], expected="/console/*"))
 
     contract = Path(state["workbench_root"]) / page["contract_path"]
     if not contract.exists():
-        findings.append(Finding(
-            severity="blocker",
-            code="MISSING_PAGE_CONTRACT",
-            message=f'Missing page contract for {page["id"]}.',
-            expected=page["contract_path"],
-        ))
+        findings.append(Finding(severity="blocker", code="MISSING_PAGE_CONTRACT", message=f'Missing page contract for {page["id"]}.', expected=page["contract_path"]))
 
     if state.get("execution_mode", "dry_run") == "write":
         for name in DEFAULT_POLICY.code_validations:
             result = run_named_validation(state["source_repo_root"], name)
             results.append(result)
             if result["returncode"] != 0:
-                findings.append(Finding(
-                    severity="blocker",
-                    code=f"VALIDATION_{name.upper()}",
-                    message=f"Code validation failed: {name}",
-                    evidence=str(result["output"]),
-                    expected="returncode 0",
-                ))
+                findings.append(Finding(severity="blocker", code=f"VALIDATION_{name.upper()}", message=f"Code validation failed: {name}", evidence=str(result["output"]), expected="returncode 0"))
 
     return {
         "verification_findings": findings,
@@ -66,7 +48,6 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
 
 
 def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
-    """Deterministic integration anchor outside the LLM loop."""
     findings = list(state.get("verification_findings", []))
     results = list(state.get("validation_results", []))
 
@@ -75,13 +56,7 @@ def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
             result = run_named_validation(state["source_repo_root"], name)
             results.append(result)
             if result["returncode"] != 0:
-                findings.append(Finding(
-                    severity="blocker",
-                    code=f"REALITY_{name.upper()}",
-                    message=f"Reality anchor failed: {name}",
-                    evidence=str(result["output"]),
-                    expected="returncode 0",
-                ))
+                findings.append(Finding(severity="blocker", code=f"REALITY_{name.upper()}", message=f"Reality anchor failed: {name}", evidence=str(result["output"]), expected="returncode 0"))
 
     report = {
         "deterministic_validations": list(DEFAULT_POLICY.reality_validations),
@@ -98,7 +73,6 @@ def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
 
 
 def policy_reviewer(state: UIRebuildState) -> dict[str, Any]:
-    """Independent reviewer with severity policy applied by Python, never by self-review."""
     page = state.get("current_page")
     if page is None:
         return {"review_findings": []}
@@ -133,7 +107,6 @@ def policy_reviewer(state: UIRebuildState) -> dict[str, Any]:
 
 
 def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
-    """Bounded Fixer that stays inside the already-approved implementation plan."""
     current = state.get("fix_round", 0) + 1
     max_rounds = state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds)
     if current > max_rounds:
@@ -141,25 +114,16 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
         page_id = page["id"] if page else "unknown"
         warnings = list(state.get("warnings", []))
         warnings.append(f"Fix loop exhausted after {max_rounds} rounds for {page_id}; escalating to human review.")
-        return {
-            "fix_round": max_rounds,
-            "current_page_status": "fix_exhausted",
-            "changed_files": _changed_files(state),
-            "warnings": warnings,
-        }
+        return {"fix_round": max_rounds, "current_page_status": "fix_exhausted", "changed_files": _changed_files(state), "warnings": warnings}
 
     if state.get("execution_mode", "dry_run") == "dry_run":
-        return {
-            "fix_round": current,
-            "verification_findings": [],
-            "review_findings": [],
-            "current_page_status": "fix_applied_dry_run",
-        }
+        return {"fix_round": current, "verification_findings": [], "review_findings": [], "current_page_status": "fix_applied_dry_run"}
 
     page = state.get("current_page")
     if page is None:
         return {"fix_round": current}
 
+    dirty_files = _changed_files(state)
     report = run_v1_fixer_agent(
         model_name=state["model_name"],
         source_root=state["source_repo_root"],
@@ -169,6 +133,7 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
         implementation_plan=state.get("implementation_plan", {}),
         verification_findings=list(state.get("verification_findings", [])),
         review_findings=list(state.get("review_findings", [])),
+        restore_files=dirty_files,
     )
     usage = dict(report.pop("_usage", {}))
     status = "fix_applied" if report["status"] == "COMPLETE" else "fix_blocked"
@@ -186,7 +151,6 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
 
 
 def page_checkpoint(state: UIRebuildState) -> dict[str, Any]:
-    """Create a local Git checkpoint after one page passes every quality gate."""
     page = state.get("current_page")
     if page is None:
         return {}
@@ -208,7 +172,6 @@ def page_checkpoint(state: UIRebuildState) -> dict[str, Any]:
 
 
 def human_review_gate(state: UIRebuildState) -> dict[str, Any]:
-    """Human gate with complete Graph Engineering quality, budget and recovery context."""
     decision = interrupt({
         "type": "burncloud_graph_engineering_v1_final_gate",
         "execution_mode": state.get("execution_mode", "write"),

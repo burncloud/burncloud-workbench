@@ -82,18 +82,15 @@ def _message_text(message: Any) -> str:
 
 def _usage(result: dict[str, Any], role: str) -> dict[str, Any]:
     messages = list(result.get("messages", []))
-    model_calls = 0
-    tool_calls = 0
-    input_tokens = 0
-    output_tokens = 0
-    total_tokens = 0
+    model_calls = tool_calls = input_tokens = output_tokens = total_tokens = 0
     for message in messages:
         if isinstance(message, AIMessage):
             model_calls += 1
             usage = getattr(message, "usage_metadata", None) or {}
             input_tokens += int(usage.get("input_tokens", 0) or 0)
             output_tokens += int(usage.get("output_tokens", 0) or 0)
-            total_tokens += int(usage.get("total_tokens", 0) or 0)
+            reported_total = int(usage.get("total_tokens", 0) or 0)
+            total_tokens += reported_total or int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)
         elif isinstance(message, ToolMessage):
             tool_calls += 1
     return {
@@ -199,6 +196,7 @@ def run_planned_builder_agent(*, model_name: str, source_root: str, workbench_ro
         allow_write=True,
         expected_branch=agent_branch,
         allowed_write_files=allowed_files,
+        allowed_restore_files=allowed_files,
     )
     agent = create_agent(
         model=create_chat_model(model_name, timeout=budget.model_timeout_seconds),
@@ -208,7 +206,7 @@ def run_planned_builder_agent(*, model_name: str, source_root: str, workbench_ro
 
 Builder rules:
 - Implement the approved plan; do not rediscover or redesign the whole page.
-- You may write ONLY files in allowed_files. Tool enforcement will reject anything else.
+- You may edit or restore ONLY files in allowed_files. Tool enforcement rejects anything else.
 - If the plan is insufficient, return BLOCKED rather than expanding scope.
 - Use exact targeted edits; format only Rust files intentionally changed.
 - Inspect git_diff before finishing, but leave fmt/check/test to deterministic graph nodes.
@@ -289,7 +287,7 @@ def run_v1_fixer_agent(
 Fixer rules:
 - Fix only supplied blocking findings inside the already-approved plan scope.
 - Do not add new editable files to the plan or perform unrelated refactors.
-- Files outside allowed_files may only be discarded with restore_source_file when they are explicitly listed in restore_files because they are already dirty scope pollution.
+- Files outside allowed_files may only be discarded with restore_source_file when explicitly listed in restore_files because they are already dirty scope pollution.
 - restore_source_file does NOT grant edit permission to that file.
 - If a finding requires a backend capability not approved for this page graph, return BLOCKED and preserve the BackendGap.
 - Leave deterministic validation to the graph after you finish.

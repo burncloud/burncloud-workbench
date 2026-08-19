@@ -8,10 +8,14 @@ from burncloud_ui_rebuild.graph import (
     initial_state,
 )
 from burncloud_ui_rebuild.page_graph import (
+    _after_builder,
     _after_code_verification,
     _after_fix,
+    _after_plan_guard,
     _after_reality_anchor,
     _after_review,
+    _after_scope_guard,
+    _after_scout,
     _capture_fix_context,
     _finalize_fix,
 )
@@ -33,6 +37,20 @@ def test_explicit_dry_run_and_page_limit_are_preserved():
     assert defaults["page_limit"] == 7
 
 
+def test_v1_scout_plan_builder_routing():
+    assert _after_scout({"current_page_status": "scouted"}) == "规划"
+    assert _after_scout({"current_page_status": "scout_blocked"}) == "人工介入"
+    assert _after_scout({"current_page_status": "budget_exhausted"}) == "人工介入"
+
+    assert _after_plan_guard({"plan_findings": [], "plan_round": 1}) == "实施"
+    assert _after_plan_guard({"plan_findings": [{"severity": "major"}], "plan_round": 1}) == "重新规划"
+    assert _after_plan_guard({"plan_findings": [{"severity": "major"}], "plan_round": DEFAULT_POLICY.max_plan_rounds}) == "人工介入"
+
+    assert _after_builder({"current_page_status": "built", "execution_mode": "write"}) == "范围检查"
+    assert _after_builder({"current_page_status": "built", "execution_mode": "dry_run"}) == "代码验证"
+    assert _after_builder({"current_page_status": "builder_blocked", "execution_mode": "write"}) == "人工介入"
+
+
 def test_only_major_and_blocker_findings_trigger_repair():
     minor = [{"severity": "minor", "code": "COPY", "message": "wording polish"}]
     info = [{"severity": "info", "code": "NOTE", "message": "future idea"}]
@@ -49,10 +67,12 @@ def test_only_major_and_blocker_findings_trigger_repair():
     assert _after_review({"review_findings": blocker}) == "修复"
 
 
-def test_deterministic_quality_failures_route_directly_to_fixer():
+def test_scope_and_deterministic_quality_failures_route_to_fixer():
     blocker = [{"severity": "blocker", "code": "CHECK", "message": "failed"}]
+    assert _after_scope_guard({"verification_findings": blocker}) == "修复"
     assert _after_code_verification({"verification_findings": blocker}) == "修复"
     assert _after_reality_anchor({"verification_findings": blocker}) == "修复"
+    assert _after_scope_guard({"verification_findings": []}) == "代码验证"
     assert _after_code_verification({"verification_findings": []}) == "现实验证"
     assert _after_reality_anchor({"verification_findings": []}) == "审查"
 
@@ -60,7 +80,8 @@ def test_deterministic_quality_failures_route_directly_to_fixer():
 def test_exhausted_or_blocked_fix_routes_to_human_intervention():
     assert _after_fix({"current_page_status": "fix_exhausted"}) == "人工介入"
     assert _after_fix({"current_page_status": "fix_blocked"}) == "人工介入"
-    assert _after_fix({"current_page_status": "fix_applied"}) == "重新验证"
+    assert _after_fix({"current_page_status": "budget_exhausted"}) == "人工介入"
+    assert _after_fix({"current_page_status": "fix_applied"}) == "重新检查范围"
 
 
 def test_fix_context_is_preserved_when_fixer_blocks():
@@ -92,19 +113,21 @@ def test_fix_context_is_preserved_when_fixer_blocks():
 
 
 def test_blocked_page_is_not_checkpointed_or_marked_complete():
-    assert _after_page_rebuild({"current_page_status": "fix_exhausted"}) == "人工介入"
-    assert _after_page_rebuild({"current_page_status": "fix_blocked"}) == "人工介入"
-    assert _after_page_rebuild({"current_page_status": "builder_blocked"}) == "人工介入"
+    for status in (
+        "scout_blocked",
+        "plan_rejected",
+        "builder_blocked",
+        "budget_exhausted",
+        "fix_exhausted",
+        "fix_blocked",
+    ):
+        assert _after_page_rebuild({"current_page_status": status}) == "人工介入"
     assert _after_page_rebuild({"current_page_status": "review_passed"}) == "页面通过"
     assert _after_page_rebuild({"current_page_status": "review_passed_with_warnings"}) == "页面通过"
 
 
 def test_dry_run_processes_all_pages_then_waits_for_human():
-    state = initial_state(
-        execution_mode="dry_run",
-        thread_id="test-ui-rebuild",
-        page_limit=25,
-    )
+    state = initial_state(execution_mode="dry_run", thread_id="test-ui-rebuild", page_limit=25)
     graph = build_graph(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "test-ui-rebuild"}}
 
@@ -118,10 +141,7 @@ def test_dry_run_processes_all_pages_then_waits_for_human():
 
 
 def test_dry_run_defaults_to_first_golden_page():
-    state = initial_state(
-        execution_mode="dry_run",
-        thread_id="test-ui-rebuild-one-page",
-    )
+    state = initial_state(execution_mode="dry_run", thread_id="test-ui-rebuild-one-page")
     graph = build_graph(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "test-ui-rebuild-one-page"}}
 

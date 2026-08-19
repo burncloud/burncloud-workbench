@@ -20,6 +20,7 @@ from burncloud_ui_rebuild.nodes import (
 from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.policy import DEFAULT_POLICY
 from burncloud_ui_rebuild.quality_nodes import human_review_gate, page_checkpoint
+from burncloud_ui_rebuild.recovery_gate import recovery_confirmation_gate
 from burncloud_ui_rebuild.state import UIRebuildState
 
 
@@ -31,6 +32,7 @@ NODE_PERMISSION = "权限守卫"
 NODE_WORKTREE = "创建开发分支"
 NODE_PREFLIGHT = "写入预检"
 NODE_RUN_CONTEXT = "运行上下文"
+NODE_RECOVERY_GATE = "恢复审批"
 NODE_RECOVERY = "恢复检查"
 NODE_ARCHITECTURE = "架构规划"
 NODE_SELECT_PAGE = "选择下一页"
@@ -83,6 +85,7 @@ def build_graph(checkpointer=None):
     builder.add_node(NODE_WORKTREE, prepare_worktree)
     builder.add_node(NODE_PREFLIGHT, write_preflight)
     builder.add_node(NODE_RUN_CONTEXT, initialize_run_context)
+    builder.add_node(NODE_RECOVERY_GATE, recovery_confirmation_gate)
     builder.add_node(NODE_RECOVERY, recovery_node)
     builder.add_node(NODE_ARCHITECTURE, architecture_agent)
     builder.add_node(NODE_SELECT_PAGE, select_next_page)
@@ -101,7 +104,8 @@ def build_graph(checkpointer=None):
     builder.add_edge(NODE_PERMISSION, NODE_WORKTREE)
     builder.add_edge(NODE_WORKTREE, NODE_PREFLIGHT)
     builder.add_edge(NODE_PREFLIGHT, NODE_RUN_CONTEXT)
-    builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY)
+    builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY_GATE)
+    builder.add_edge(NODE_RECOVERY_GATE, NODE_RECOVERY)
     builder.add_edge(NODE_RECOVERY, NODE_ARCHITECTURE)
     builder.add_edge(NODE_ARCHITECTURE, NODE_SELECT_PAGE)
 

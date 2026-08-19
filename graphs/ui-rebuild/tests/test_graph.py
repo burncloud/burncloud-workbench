@@ -1,7 +1,16 @@
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from burncloud_ui_rebuild.graph import build_graph, initial_state
+from burncloud_ui_rebuild.graph import build_graph, default_execution_mode, initial_state
+
+
+def test_default_execution_mode_is_write():
+    assert initial_state()["execution_mode"] == "write"
+    assert default_execution_mode({})["execution_mode"] == "write"
+
+
+def test_explicit_dry_run_is_preserved():
+    assert default_execution_mode({"execution_mode": "dry_run"})["execution_mode"] == "dry_run"
 
 
 def test_dry_run_processes_all_pages_then_waits_for_human():

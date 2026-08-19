@@ -4,6 +4,7 @@ import json
 from typing import Any, Literal
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from burncloud_ui_rebuild.coding_tools import build_coding_tools
 from burncloud_ui_rebuild.model_factory import create_chat_model
+from burncloud_ui_rebuild.policy import AgentBudget, DEFAULT_POLICY
 
 
 PROBE_VALUE = "burncloud-agent-ready"
@@ -58,6 +60,25 @@ def _message_text(message: Any) -> str:
     if isinstance(content, str):
         return content
     return str(content)
+
+
+def _budget_middleware(budget: AgentBudget):
+    """Keep an inner create_agent loop bounded even when the outer graph is healthy."""
+    return [
+        ModelCallLimitMiddleware(
+            run_limit=budget.max_model_calls,
+            exit_behavior="end",
+        ),
+        ToolCallLimitMiddleware(
+            run_limit=budget.max_tool_calls,
+            exit_behavior="continue",
+        ),
+    ]
+
+
+def _last_agent_text(result: dict[str, Any]) -> str:
+    messages = list(result.get("messages", []))
+    return _message_text(messages[-1]).strip() if messages else ""
 
 
 def build_probe_agent(model_name: str):
@@ -122,11 +143,12 @@ Engineering rules:
 - Discover source paths with search_source/list_source_directory before reading a path that was not already returned by a tool or supplied as an approved known path.
 - Never invent repository paths from module names. If a read/list/search returns NOT_FOUND, treat it as recoverable: discover the real path and retry.
 - Make the smallest correct change for the assigned scope.
-- The write toolset enforces a hard budget of at most 8 distinct files per Agent invocation. Do not work around that limit; report BLOCKED if the page genuinely requires broader work.
+- The write toolset enforces a hard file budget. Do not work around it; report BLOCKED if the page genuinely requires broader work.
 - Never run or request crate-wide/workspace-wide formatting. If formatting is required, call format_source_file only for Rust files you intentionally changed.
 - Reuse existing BurnCloud components and patterns where they satisfy the target contract.
 - Never access .git internals.
 - Never commit, push, merge, publish, install packages, or execute arbitrary shell commands.
+- Deterministic validation belongs to graph nodes, not to your private loop. Do not repeatedly run tests just to self-confirm.
 - Use only the provided tools.
 - Do not expose secrets in output.
 """.strip()
@@ -143,17 +165,19 @@ def run_builder_agent(
     permission_findings: list[dict[str, Any]],
     allow_write: bool,
 ) -> dict[str, Any]:
+    budget = DEFAULT_POLICY.builder_budget
     tools = build_coding_tools(
         source_root=source_root,
         workbench_root=workbench_root,
         allow_write=allow_write,
         expected_branch=agent_branch if allow_write else None,
     )
-    model = create_chat_model(model_name, timeout=180)
+    model = create_chat_model(model_name, timeout=budget.model_timeout_seconds)
     agent = create_agent(
         model=model,
         tools=tools,
-        system_prompt=_base_system_prompt("Builder") + """
+        middleware=_budget_middleware(budget),
+        system_prompt=_base_system_prompt("Builder") + f"""
 
 Builder-specific rules:
 - Before implementation, read this page's Page Contract and the relevant product/IA/agent-execution standards.
@@ -161,7 +185,8 @@ Builder-specific rules:
 - If a prerequisite foundation is missing, implement only the minimum prerequisite required by this page; do not rebuild unrelated pages.
 - In write mode, use targeted replacement/create tools and inspect git_diff afterward.
 - Format only Rust files you intentionally changed, using format_source_file one file at a time.
-- Run cargo_fmt_check and client_check after source changes unless a concrete repository limitation blocks them.
+- The outer graph owns fmt/check/test verification. Spend your budget on implementation, not repeated self-testing.
+- Run budget: at most {budget.max_model_calls} model calls and {budget.max_tool_calls} tool calls.
 - In read-only mode, produce a plan and report BLOCKED rather than pretending files changed.
 """,
         response_format=ToolStrategy(BuilderReport),
@@ -183,9 +208,14 @@ Builder-specific rules:
     }
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
-    if not isinstance(report, BuilderReport):
-        raise RuntimeError("Builder Agent did not return a validated BuilderReport.")
-    return report.model_dump()
+    if isinstance(report, BuilderReport):
+        return report.model_dump()
+
+    return BuilderReport(
+        status="BLOCKED",
+        summary="Builder stopped before producing a validated report, usually because its model/tool budget was exhausted.",
+        known_gaps=[_last_agent_text(result) or "AGENT_BUDGET_OR_EARLY_TERMINATION"],
+    ).model_dump()
 
 
 def run_reviewer_agent(
@@ -198,16 +228,18 @@ def run_reviewer_agent(
     verification_findings: list[dict[str, Any]],
     changed_files: list[str],
 ) -> dict[str, Any]:
+    budget = DEFAULT_POLICY.reviewer_budget
     tools = build_coding_tools(
         source_root=source_root,
         workbench_root=workbench_root,
         allow_write=False,
     )
-    model = create_chat_model(model_name, timeout=180)
+    model = create_chat_model(model_name, timeout=budget.model_timeout_seconds)
     agent = create_agent(
         model=model,
         tools=tools,
-        system_prompt=_base_system_prompt("Reviewer") + """
+        middleware=_budget_middleware(budget),
+        system_prompt=_base_system_prompt("Reviewer") + f"""
 
 Reviewer-specific rules:
 - You are independent from Builder and must never edit source.
@@ -215,8 +247,9 @@ Reviewer-specific rules:
 - Judge Product Contract, role boundary, state completeness, security/privacy, consistency, and regression risk.
 - Deterministic verification findings are evidence and cannot be ignored.
 - Treat unexpectedly broad diffs as a scope/regression risk, especially when unrelated pages or files changed.
-- Do not redesign the page. Return PASS only when there are no blocker/major correctness findings for the assigned scope.
-- Every FAIL finding must include severity, stable code, evidence, and expected correction.
+- Do not redesign the page. blocker/major findings block completion; minor/info findings are advisory and should not force a repair loop.
+- Every blocking finding must include severity, stable code, evidence, and expected correction.
+- Run budget: at most {budget.max_model_calls} model calls and {budget.max_tool_calls} tool calls.
 """,
         response_format=ToolStrategy(ReviewerReport),
     )
@@ -235,9 +268,22 @@ Reviewer-specific rules:
     }
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
-    if not isinstance(report, ReviewerReport):
-        raise RuntimeError("Reviewer Agent did not return a validated ReviewerReport.")
-    return report.model_dump()
+    if isinstance(report, ReviewerReport):
+        return report.model_dump()
+
+    return ReviewerReport(
+        decision="FAIL",
+        summary="Reviewer stopped before producing a validated report.",
+        findings=[
+            AgentFinding(
+                severity="major",
+                code="REVIEWER_BUDGET_OR_EARLY_TERMINATION",
+                message="Reviewer did not complete within its model/tool budget.",
+                evidence=_last_agent_text(result),
+                expected="Complete an independent review within the configured HarnessPolicy budget.",
+            )
+        ],
+    ).model_dump()
 
 
 def run_fixer_agent(
@@ -247,39 +293,50 @@ def run_fixer_agent(
     workbench_root: str,
     agent_branch: str,
     page: dict[str, Any],
+    verification_findings: list[dict[str, Any]],
     review_findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    budget = DEFAULT_POLICY.fixer_budget
     tools = build_coding_tools(
         source_root=source_root,
         workbench_root=workbench_root,
         allow_write=True,
         expected_branch=agent_branch,
     )
-    model = create_chat_model(model_name, timeout=180)
+    model = create_chat_model(model_name, timeout=budget.model_timeout_seconds)
     agent = create_agent(
         model=model,
         tools=tools,
-        system_prompt=_base_system_prompt("Fixer") + """
+        middleware=_budget_middleware(budget),
+        system_prompt=_base_system_prompt("Fixer") + f"""
 
 Fixer-specific rules:
-- Fix only the supplied Reviewer findings for the assigned page.
+- Fix only the supplied deterministic/reviewer findings for the assigned page.
 - Do not perform unrelated refactors or redesigns.
 - Inspect the exact evidence before editing.
+- If a SCOPE-DIFF finding names an unrelated tracked file, restore that file rather than hand-editing formatting back.
 - Format only Rust files you intentionally changed, using format_source_file one file at a time.
-- After edits, inspect git_diff and run the relevant allowlisted validations.
+- The outer graph will re-run deterministic verification after you finish.
 - If a finding cannot be fixed safely inside the assigned scope, report BLOCKED and explain the concrete gap.
+- Run budget: at most {budget.max_model_calls} model calls and {budget.max_tool_calls} tool calls.
 """,
         response_format=ToolStrategy(FixerReport),
     )
     prompt = {
-        "task": "Correct only the listed review findings.",
+        "task": "Correct only the listed blocking findings.",
         "agent_branch": agent_branch,
         "page": page,
+        "verification_findings": verification_findings,
         "review_findings": review_findings,
         "page_contract": page["contract_path"],
     }
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
-    if not isinstance(report, FixerReport):
-        raise RuntimeError("Fixer Agent did not return a validated FixerReport.")
-    return report.model_dump()
+    if isinstance(report, FixerReport):
+        return report.model_dump()
+
+    return FixerReport(
+        status="BLOCKED",
+        summary="Fixer stopped before producing a validated report, usually because its model/tool budget was exhausted.",
+        known_gaps=[_last_agent_text(result) or "AGENT_BUDGET_OR_EARLY_TERMINATION"],
+    ).model_dump()

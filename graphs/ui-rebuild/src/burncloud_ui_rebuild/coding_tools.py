@@ -11,32 +11,10 @@ from .policy import DEFAULT_POLICY
 
 
 IGNORED_DIRS = {
-    ".git",
-    ".venv",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    ".next",
-    ".pytest_cache",
-    "__pycache__",
+    ".git", ".venv", "node_modules", "target", "dist", "build", ".next", ".pytest_cache", "__pycache__",
 }
 TEXT_SUFFIXES = {
-    ".rs",
-    ".toml",
-    ".md",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".css",
-    ".scss",
-    ".html",
-    ".py",
-    ".sh",
+    ".rs", ".toml", ".md", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".html", ".py", ".sh",
 }
 MAX_TOOL_OUTPUT = DEFAULT_POLICY.max_tool_output_chars
 MAX_WRITE_FILES_PER_AGENT = DEFAULT_POLICY.max_write_files_per_agent
@@ -47,7 +25,6 @@ class ToolSafetyError(RuntimeError):
 
 
 def normalize_repo_path(path: str) -> str:
-    """Normalize separators and a single/multiple './' prefix without hiding '..'."""
     normalized = path.replace("\\", "/").strip()
     while normalized.startswith("./"):
         normalized = normalized[2:]
@@ -70,7 +47,6 @@ def _safe_path(root: Path, relative: str, *, allow_missing: bool = False) -> Pat
         if any(part in {"..", ".git"} for part in raw.parts):
             raise ToolSafetyError("Parent traversal and .git access are not allowed.")
         candidate = (root / raw).resolve()
-
     resolved_root = root.resolve()
     if candidate != resolved_root and resolved_root not in candidate.parents:
         raise ToolSafetyError("Path escaped the configured repository root.")
@@ -82,8 +58,7 @@ def _safe_path(root: Path, relative: str, *, allow_missing: bool = False) -> Pat
 def _recoverable_path_error(kind: str, relative: str) -> str:
     return (
         f"{kind}: {relative}\n"
-        "This is a recoverable discovery miss. Use list_source_directory or search_source "
-        "to locate the real path, then retry."
+        "This is a recoverable discovery miss. Use list_source_directory or search_source to locate the real path, then retry."
     )
 
 
@@ -93,7 +68,7 @@ def _read_lines(path: Path, start_line: int, end_line: int) -> str:
     if end_line - start_line + 1 > DEFAULT_POLICY.max_read_lines:
         raise ValueError(f"A single read is limited to {DEFAULT_POLICY.max_read_lines} lines.")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    selected = lines[start_line - 1 : end_line]
+    selected = lines[start_line - 1:end_line]
     return _clip("\n".join(f"{idx}: {line}" for idx, line in enumerate(selected, start=start_line)))
 
 
@@ -123,11 +98,7 @@ def _run(root: Path, argv: list[str], *, timeout: int) -> dict[str, object]:
         check=False,
     )
     combined = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
-    return {
-        "command": " ".join(argv),
-        "returncode": completed.returncode,
-        "output": _clip(combined),
-    }
+    return {"command": " ".join(argv), "returncode": completed.returncode, "output": _clip(combined)}
 
 
 def git_status(source_root: str | Path) -> str:
@@ -173,10 +144,7 @@ def run_named_validation(source_root: str | Path, name: str) -> dict[str, object
         "cargo_fmt_check": (["cargo", "fmt", "-p", "burncloud-client", "--", "--check"], 180),
         "client_check": (["cargo", "check", "-p", "burncloud-client"], 900),
         "client_test": (["cargo", "test", "-p", "burncloud-client"], 900),
-        "client_liveview_check": (
-            ["cargo", "check", "-p", "burncloud-client", "--no-default-features", "--features", "liveview"],
-            900,
-        ),
+        "client_liveview_check": (["cargo", "check", "-p", "burncloud-client", "--no-default-features", "--features", "liveview"], 900),
         "application_integration_check": (["cargo", "check", "-p", "burncloud"], 1200),
     }
     if name not in commands:
@@ -207,39 +175,21 @@ def create_page_checkpoint(source_root: str | Path, page_id: str) -> dict[str, o
     branch = git_branch(root)
     if branch in {"main", "master"} or not branch.startswith("agent/ui-rebuild/"):
         raise ToolSafetyError(f"Refusing checkpoint on non-Agent branch: {branch!r}")
-
     before = head_commit(root)
-    status = git_status(root)
-    if not status:
+    if not git_status(root):
         return {"status": "no_changes", "page_id": page_id, "branch": branch, "commit": before}
-
     add_result = _run(root, ["git", "add", "-A", "--", "."], timeout=60)
     if add_result["returncode"] != 0:
         raise RuntimeError(str(add_result["output"]))
     commit_result = _run(
         root,
-        [
-            "git",
-            "-c",
-            "user.name=BurnCloud UI Rebuild",
-            "-c",
-            "user.email=agent@burncloud.local",
-            "commit",
-            "-m",
-            f"agent(ui): checkpoint {page_id}",
-        ],
+        ["git", "-c", "user.name=BurnCloud UI Rebuild", "-c", "user.email=agent@burncloud.local", "commit", "-m", f"agent(ui): checkpoint {page_id}"],
         timeout=120,
     )
     if commit_result["returncode"] != 0:
         raise RuntimeError(str(commit_result["output"]))
     after = head_commit(root)
-    return {
-        "status": "committed",
-        "page_id": page_id,
-        "branch": branch,
-        "previous_commit": before,
-        "commit": after,
-    }
+    return {"status": "committed", "page_id": page_id, "branch": branch, "previous_commit": before, "commit": after}
 
 
 def restore_page_checkpoint(source_root: str | Path, target_commit: str) -> dict[str, object]:
@@ -247,27 +197,18 @@ def restore_page_checkpoint(source_root: str | Path, target_commit: str) -> dict
     branch = git_branch(root)
     if branch in {"main", "master"} or not branch.startswith("agent/ui-rebuild/"):
         raise ToolSafetyError(f"Refusing recovery on non-Agent branch: {branch!r}")
-
     history = checkpoint_history(root)
     known = {item["commit"]: item["page_id"] for item in history}
     if target_commit not in known:
         raise ToolSafetyError("Recovery target is not a known BurnCloud page checkpoint commit.")
-
     ancestor = _run(root, ["git", "merge-base", "--is-ancestor", target_commit, "HEAD"], timeout=30)
     if ancestor["returncode"] != 0:
         raise ToolSafetyError("Recovery target is not an ancestor of current Agent HEAD.")
-
     untracked = [line for line in git_status(root).splitlines() if line.startswith("??")]
     reset = _run(root, ["git", "reset", "--hard", target_commit], timeout=60)
     if reset["returncode"] != 0:
         raise RuntimeError(str(reset["output"]))
-    return {
-        "status": "restored",
-        "branch": branch,
-        "commit": target_commit,
-        "page_id": known[target_commit],
-        "untracked_preserved": untracked,
-    }
+    return {"status": "restored", "branch": branch, "commit": target_commit, "page_id": known[target_commit], "untracked_preserved": untracked}
 
 
 def build_coding_tools(
@@ -277,15 +218,13 @@ def build_coding_tools(
     allow_write: bool,
     expected_branch: str | None = None,
     allowed_write_files: Iterable[str] | None = None,
+    allowed_restore_files: Iterable[str] | None = None,
 ):
     source = Path(source_root).resolve()
     workbench = Path(workbench_root).resolve()
-    written_paths: set[str] = set()
-    planned_files = (
-        {normalize_repo_path(path) for path in allowed_write_files}
-        if allowed_write_files is not None
-        else None
-    )
+    touched_paths: set[str] = set()
+    planned_files = {normalize_repo_path(path) for path in allowed_write_files} if allowed_write_files is not None else None
+    restorable_files = {normalize_repo_path(path) for path in allowed_restore_files} if allowed_restore_files is not None else None
 
     def assert_write_branch() -> None:
         if not allow_write or not expected_branch:
@@ -294,26 +233,30 @@ def build_coding_tools(
         if actual in {"main", "master"}:
             raise ToolSafetyError(f"Direct writes to protected branch {actual!r} are forbidden.")
         if actual != expected_branch:
-            raise ToolSafetyError(
-                f"Agent write branch mismatch: expected {expected_branch!r}, current branch is {actual!r}."
+            raise ToolSafetyError(f"Agent write branch mismatch: expected {expected_branch!r}, current branch is {actual!r}.")
+
+    def claim_budget(relative: str) -> str | None:
+        if relative in touched_paths:
+            return None
+        if len(touched_paths) >= MAX_WRITE_FILES_PER_AGENT:
+            return (
+                f"WRITE_BUDGET_REFUSED: this Agent is limited to {MAX_WRITE_FILES_PER_AGENT} distinct files per run. "
+                f"Already touched: {sorted(touched_paths)}."
             )
+        touched_paths.add(relative)
+        return None
 
     def claim_write(target: Path) -> str | None:
         relative = normalize_repo_path(target.relative_to(source).as_posix())
         if planned_files is not None and relative not in planned_files:
-            return (
-                f"PLAN_SCOPE_REFUSED: {relative} is not in the approved implementation plan. "
-                f"Approved files: {sorted(planned_files)}. Return BLOCKED instead of expanding scope."
-            )
-        if relative in written_paths:
-            return None
-        if len(written_paths) >= MAX_WRITE_FILES_PER_AGENT:
-            return (
-                f"WRITE_BUDGET_REFUSED: this Agent is limited to {MAX_WRITE_FILES_PER_AGENT} distinct files per run. "
-                f"Already touched: {sorted(written_paths)}. Keep the current page scope small or report BLOCKED."
-            )
-        written_paths.add(relative)
-        return None
+            return f"PLAN_SCOPE_REFUSED: {relative} is not in approved allowed_files={sorted(planned_files)}."
+        return claim_budget(relative)
+
+    def claim_restore(target: Path) -> str | None:
+        relative = normalize_repo_path(target.relative_to(source).as_posix())
+        if restorable_files is not None and relative not in restorable_files:
+            return f"RESTORE_SCOPE_REFUSED: {relative} is not in current dirty-file restore scope={sorted(restorable_files)}."
+        return claim_budget(relative)
 
     @tool("read_source_file")
     def read_source_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
@@ -353,8 +296,7 @@ def build_coding_tools(
         for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
             if child.name in IGNORED_DIRS or child.name == ".git":
                 continue
-            kind = "dir" if child.is_dir() else "file"
-            items.append(f"{kind}\t{child.relative_to(source).as_posix()}")
+            items.append(f"{'dir' if child.is_dir() else 'file'}\t{child.relative_to(source).as_posix()}")
         return _clip("\n".join(items))
 
     @tool("search_source")
@@ -377,8 +319,7 @@ def build_coding_tools(
                 continue
             for line_number, line in enumerate(lines, start=1):
                 if needle in line.lower():
-                    relative = file_path.relative_to(source).as_posix()
-                    matches.append(f"{relative}:{line_number}: {line.strip()}")
+                    matches.append(f"{file_path.relative_to(source).as_posix()}:{line_number}: {line.strip()}")
                     if len(matches) >= max_results:
                         return _clip("\n".join(matches))
         return _clip("\n".join(matches) if matches else "NO_MATCHES")
@@ -415,10 +356,7 @@ def build_coding_tools(
             text = target.read_text(encoding="utf-8")
             actual = text.count(old)
             if actual != expected_occurrences:
-                return (
-                    f"REPLACEMENT_REFUSED: expected {expected_occurrences} exact occurrence(s), found {actual}.\n"
-                    "Re-read the current file, choose a smaller exact anchor, and retry."
-                )
+                return f"REPLACEMENT_REFUSED: expected {expected_occurrences} exact occurrence(s), found {actual}. Re-read and retry."
             refused = claim_write(target)
             if refused:
                 return refused
@@ -431,10 +369,7 @@ def build_coding_tools(
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             if target.exists():
-                return (
-                    f"CREATE_REFUSED: {path} already exists.\n"
-                    "Read the existing file and use replace_source_text if a change is required."
-                )
+                return f"CREATE_REFUSED: {path} already exists."
             refused = claim_write(target)
             if refused:
                 return refused
@@ -458,14 +393,14 @@ def build_coding_tools(
 
         @tool("restore_source_file")
         def restore_source_file(path: str) -> str:
-            """Restore one approved tracked file to current Agent-branch HEAD for scope cleanup."""
+            """Discard uncommitted changes in one current dirty tracked file without granting edit scope."""
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             relative = normalize_repo_path(target.relative_to(source).as_posix())
             tracked = _run(source, ["git", "ls-files", "--error-unmatch", "--", relative], timeout=30)
             if tracked["returncode"] != 0:
                 return f"RESTORE_REFUSED: {relative} is not a tracked file"
-            refused = claim_write(target)
+            refused = claim_restore(target)
             if refused:
                 return refused
             result = _run(source, ["git", "restore", "--", relative], timeout=30)

@@ -1,4 +1,4 @@
-name: UI Rebuild LangGraph
+name: UI Rebuild Graph Engineering v1
 
 on:
   push:
@@ -39,5 +39,8 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q src tests
 
-      - name: Run tests
+      - name: Run unit and graph tests
         run: pytest
+
+      - name: Run v1 dry-run graph smoke
+        run: burncloud-ui-rebuild dry-run --limit 1 --approve

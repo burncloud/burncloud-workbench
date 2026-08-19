@@ -8,6 +8,11 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 
+# CLI commands need the same local .env behavior as `langgraph dev`. Existing
+# process environment always wins because override=False.
+load_dotenv(override=False)
+
+
 @dataclass(frozen=True)
 class RuntimeSecrets:
     """Runtime-only secrets and endpoint configuration.
@@ -31,8 +36,7 @@ def _required_env(name: str) -> str:
 
 
 def load_runtime_secrets() -> RuntimeSecrets:
-    """Load the three approved runtime parameters from local environment or .env."""
-    load_dotenv(override=False)
+    """Load the three approved runtime parameters from the process environment."""
     return RuntimeSecrets(
         api_key=_required_env("API_KEY"),
         base_url=_required_env("BASE_URL").rstrip("/"),

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from langgraph.types import interrupt
+
 from .agents import run_fixer_agent
 from .coding_tools import changed_source_files, create_page_checkpoint, run_named_validation
 from .nodes import reviewer as base_reviewer
@@ -58,11 +60,7 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
 
 
 def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
-    """Deterministic runtime-adjacent anchor that executes real client tests.
-
-    This intentionally lives outside the LLM loop. A model cannot waive or reinterpret
-    a failing test; it must return to Fixer through graph routing.
-    """
+    """Deterministic runtime-adjacent anchor that executes real client tests."""
     findings = list(state.get("verification_findings", []))
     results = list(state.get("validation_results", []))
 
@@ -183,3 +181,43 @@ def page_checkpoint(state: UIRebuildState) -> dict[str, Any]:
         "changed_files": changed_source_files(state["source_repo_root"]),
         "phase": "page_checkpointed",
     }
+
+
+def human_review_gate(state: UIRebuildState) -> dict[str, Any]:
+    """Human gate with complete quality, policy and recovery context."""
+    decision = interrupt({
+        "type": "burncloud_ui_rebuild_final_gate",
+        "execution_mode": state.get("execution_mode", "write"),
+        "model_name": state.get("model_name", ""),
+        "policy": {
+            "max_fix_rounds": state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds),
+            "blocking_review_severities": sorted(DEFAULT_POLICY.blocking_review_severities),
+            "builder_model_calls": DEFAULT_POLICY.builder_budget.max_model_calls,
+            "builder_tool_calls": DEFAULT_POLICY.builder_budget.max_tool_calls,
+            "reviewer_model_calls": DEFAULT_POLICY.reviewer_budget.max_model_calls,
+            "reviewer_tool_calls": DEFAULT_POLICY.reviewer_budget.max_tool_calls,
+            "fixer_model_calls": DEFAULT_POLICY.fixer_budget.max_model_calls,
+            "fixer_tool_calls": DEFAULT_POLICY.fixer_budget.max_tool_calls,
+        },
+        "base_commit": state.get("base_commit", ""),
+        "agent_branch": state.get("agent_branch", ""),
+        "worktree_root": state.get("worktree_root", ""),
+        "worktree_reused": state.get("worktree_reused", False),
+        "current_page": state.get("current_page"),
+        "current_page_status": state.get("current_page_status", ""),
+        "fix_round": state.get("fix_round", 0),
+        "last_failure_reason": state.get("last_failure_reason", ""),
+        "fixer_report": state.get("fixer_report", {}),
+        "verification_findings": state.get("verification_findings", []),
+        "review_findings": state.get("review_findings", []),
+        "validation_results": state.get("validation_results", []),
+        "page_checkpoint": state.get("page_checkpoint", {}),
+        "page_checkpoint_history": state.get("page_checkpoint_history", []),
+        "completed_pages": len(state.get("completed_pages", [])),
+        "total_pages": len(state.get("page_queue", [])),
+        "changed_files": state.get("changed_files", []),
+        "warnings": state.get("warnings", []),
+        "final_findings": state.get("final_findings", []),
+        "question": "Approve this UI rebuild run for release processing?",
+    })
+    return {"human_decision": bool(decision)}

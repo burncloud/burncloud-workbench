@@ -48,6 +48,12 @@ def _page_router(state: UIRebuildState) -> str:
     return "最终检查" if state.get("current_page") is None else "重建页面"
 
 
+def _after_page_rebuild(state: UIRebuildState) -> str:
+    if state.get("current_page_status") in {"fix_exhausted", "fix_blocked", "builder_blocked"}:
+        return "人工介入"
+    return "页面完成"
+
+
 def _human_router(state: UIRebuildState) -> str:
     return "发布" if state.get("human_decision") else "结束"
 
@@ -89,7 +95,14 @@ def build_graph(checkpointer=None):
             "最终检查": NODE_FINAL_PERMISSION,
         },
     )
-    builder.add_edge(NODE_PAGE_REBUILD, NODE_MARK_COMPLETE)
+    builder.add_conditional_edges(
+        NODE_PAGE_REBUILD,
+        _after_page_rebuild,
+        {
+            "页面完成": NODE_MARK_COMPLETE,
+            "人工介入": NODE_FINAL_PERMISSION,
+        },
+    )
     builder.add_edge(NODE_MARK_COMPLETE, NODE_SELECT_PAGE)
     builder.add_edge(NODE_FINAL_PERMISSION, NODE_HUMAN_GATE)
 

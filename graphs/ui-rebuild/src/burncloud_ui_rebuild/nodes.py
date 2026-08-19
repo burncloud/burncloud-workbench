@@ -9,7 +9,7 @@ from langgraph.types import interrupt
 
 from .agents import run_builder_agent, run_fixer_agent, run_reviewer_agent
 from .coding_tools import changed_source_files, git_status, run_named_validation
-from .config import source_root as default_source_root, workbench_root as default_workbench_root
+from .config import DEFAULT_MODEL_NAME, source_root as default_source_root, workbench_root as default_workbench_root
 from .manifest import TARGET_PAGES
 from .permissions import validate_target_manifest
 from .state import Finding, UIRebuildState
@@ -41,17 +41,15 @@ def _sha256(path: Path) -> str:
 
 
 def _require_model(state: UIRebuildState) -> str:
-    model_name = state.get("model_name", "").strip()
-    if not model_name:
-        raise RuntimeError("write mode requires model_name; pass --model or set model_name in Studio state.")
-    return model_name
+    return state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
 
 
 def bootstrap(state: UIRebuildState) -> dict[str, Any]:
-    """Populate deterministic defaults so Studio runs need only mode/model/scope inputs."""
+    """Populate deterministic defaults so Studio runs can omit routine settings."""
     return {
         "thread_id": state.get("thread_id", "burncloud-ui-rebuild-studio"),
         "execution_mode": state.get("execution_mode", "dry_run"),
+        "model_name": state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
         "source_repo_root": state.get("source_repo_root") or str(default_source_root()),
         "workbench_root": state.get("workbench_root") or str(default_workbench_root()),
         "max_fix_rounds": state.get("max_fix_rounds", 3),
@@ -143,21 +141,16 @@ def permission_guardian(state: UIRebuildState) -> dict[str, Any]:
 
 
 def write_preflight(state: UIRebuildState) -> dict[str, Any]:
-    """Block live Agents before any write if the source working tree is already dirty."""
+    """Refuse live Agent writes unless the source tree starts clean."""
     if state.get("execution_mode", "dry_run") != "write":
-        return {"source_baseline_status": "not_required"}
-
-    _require_model(state)
-    root = Path(state["source_repo_root"])
-    if not root.exists():
-        raise FileNotFoundError(f"BurnCloud source repo not found: {root}")
-    status = git_status(root)
-    if status.strip():
+        return {"phase": "write_preflight_skipped"}
+    status = git_status(state["source_repo_root"])
+    if status:
         raise RuntimeError(
-            "Write mode requires a clean burncloud source working tree before Agents start. "
-            "Commit/stash existing changes or use a dedicated Git worktree. Current status:\n" + status
+            "Live rebuild requires a clean BurnCloud source working tree before Agent writes. "
+            f"Current git status:\n{status}"
         )
-    return {"source_baseline_status": "clean", "phase": "write_preflight_passed"}
+    return {"phase": "write_preflight_passed"}
 
 
 def architecture_agent(state: UIRebuildState) -> dict[str, Any]:
@@ -198,16 +191,13 @@ def select_next_page(state: UIRebuildState) -> dict[str, Any]:
         "current_page": next_page,
         "current_page_status": "selected" if next_page else "all_pages_complete",
         "fix_round": 0,
-        "builder_report": {},
-        "fixer_report": {},
-        "validation_results": [],
         "verification_findings": [],
         "review_findings": [],
     }
 
 
 def builder_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 6 — Builder: dry-run planner or live create_agent coding worker."""
+    """Role 6 — Builder: dry-run plans or live create_agent implementation."""
     page = state.get("current_page")
     if page is None:
         return {}
@@ -229,31 +219,26 @@ def builder_agent(state: UIRebuildState) -> dict[str, Any]:
         model_name=_require_model(state),
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
-        page=dict(page),
+        page=page,
         architecture_plan=state.get("architecture_plan", {}),
-        permission_findings=list(state.get("permission_findings", [])),
+        permission_findings=state.get("permission_findings", []),
         allow_write=True,
     )
-    changed_files = changed_source_files(state["source_repo_root"])
     result = {
         "page_id": page["id"],
         "route": page["route"],
         "contract_path": page["contract_path"],
-        "status": report["status"],
-        "summary": report["summary"],
-        "changed_files": changed_files,
-        "known_gaps": report.get("known_gaps", []),
+        **report,
     }
     return {
-        "builder_report": report,
-        "changed_files": changed_files,
         "implementation_results": [*state.get("implementation_results", []), result],
+        "changed_files": changed_source_files(state["source_repo_root"]),
         "current_page_status": "built" if report["status"] == "COMPLETE" else "builder_blocked",
     }
 
 
 def verifier(state: UIRebuildState) -> dict[str, Any]:
-    """Role 7 — Verifier: deterministic contract and executable checks."""
+    """Role 7 — Verifier: deterministic executable contract checks."""
     page = state.get("current_page")
     findings: list[Finding] = []
     validation_results: list[dict[str, Any]] = []
@@ -279,54 +264,34 @@ def verifier(state: UIRebuildState) -> dict[str, Any]:
         ))
 
     if state.get("execution_mode", "dry_run") == "write":
-        latest_report = state.get("fixer_report") if state.get("fix_round", 0) > 0 else state.get("builder_report")
-        if latest_report and latest_report.get("status") == "BLOCKED":
-            findings.append(Finding(
-                severity="blocker",
-                code="AGENT_BLOCKED",
-                message=str(latest_report.get("summary", "Agent reported BLOCKED.")),
-                evidence="; ".join(latest_report.get("known_gaps", [])),
-                expected="Resolve the concrete blocker before marking this page complete.",
-            ))
-
-        for check_name, severity in (("cargo_fmt_check", "major"), ("client_check", "blocker")):
-            try:
-                check = run_named_validation(state["source_repo_root"], check_name)
-                validation_results.append(check)
-                if int(check["returncode"]) != 0:
-                    findings.append(Finding(
-                        severity=severity,  # type: ignore[typeddict-item]
-                        code=f"{check_name.upper()}_FAILED",
-                        message=f"Executable validation failed: {check_name}",
-                        evidence=str(check.get("output", ""))[-4000:],
-                        expected=f"{check_name} must pass for the affected client scope.",
-                    ))
-            except Exception as exc:
-                validation_results.append({"command": check_name, "returncode": -1, "output": str(exc)})
+        for name in ("cargo_fmt_check", "client_check"):
+            result = run_named_validation(state["source_repo_root"], name)
+            validation_results.append(result)
+            if result["returncode"] != 0:
                 findings.append(Finding(
                     severity="blocker",
-                    code=f"{check_name.upper()}_ERROR",
-                    message=f"Could not execute required validation: {check_name}",
-                    evidence=str(exc),
-                    expected="Validation command must execute successfully.",
+                    code=f"VALIDATION_{name.upper()}",
+                    message=f"Validation failed: {name}",
+                    evidence=str(result["output"]),
+                    expected="returncode 0",
                 ))
 
     return {
-        "changed_files": changed_source_files(state["source_repo_root"]) if Path(state["source_repo_root"]).exists() else [],
-        "validation_results": validation_results,
         "verification_findings": findings,
+        "validation_results": validation_results,
+        "changed_files": changed_source_files(state["source_repo_root"]),
         "current_page_status": "verified" if not findings else "verification_failed",
     }
 
 
 def reviewer(state: UIRebuildState) -> dict[str, Any]:
-    """Role 8 — independent Reviewer; read-only in live mode."""
+    """Role 8 — Reviewer: independent judge; never edits code."""
     page = state.get("current_page")
-    findings = list(state.get("verification_findings", []))
     if page is None:
-        return {"review_findings": findings}
+        return {"review_findings": []}
 
     if state.get("execution_mode", "dry_run") == "dry_run":
+        findings = list(state.get("verification_findings", []))
         if page["role"] not in {"buyer", "supplier", "admin"}:
             findings.append(Finding(
                 severity="blocker",
@@ -342,34 +307,27 @@ def reviewer(state: UIRebuildState) -> dict[str, Any]:
         model_name=_require_model(state),
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
-        page=dict(page),
+        page=page,
         architecture_plan=state.get("architecture_plan", {}),
-        verification_findings=[dict(item) for item in findings],
-        changed_files=list(state.get("changed_files", [])),
+        verification_findings=state.get("verification_findings", []),
+        changed_files=state.get("changed_files", []),
     )
-    existing_keys = {(item["code"], item.get("evidence", "")) for item in findings}
-    for item in report.get("findings", []):
-        key = (item["code"], item.get("evidence", ""))
-        if key not in existing_keys:
-            findings.append(Finding(**item))
-            existing_keys.add(key)
-
+    findings = [Finding(**item) for item in report["findings"]]
     if report["decision"] == "FAIL" and not findings:
         findings.append(Finding(
             severity="major",
-            code="REVIEWER_FAIL_UNSPECIFIED",
-            message=report.get("summary", "Reviewer returned FAIL without structured findings."),
-            expected="Reviewer must provide actionable evidence before the Fixer runs.",
+            code="REVIEW_FAIL_WITHOUT_FINDING",
+            message=report["summary"],
         ))
-
     return {
         "review_findings": findings,
-        "current_page_status": "review_passed" if not findings and report["decision"] == "PASS" else "review_failed",
+        "review_summary": report["summary"],
+        "current_page_status": "review_passed" if report["decision"] == "PASS" and not findings else "review_failed",
     }
 
 
 def fixer(state: UIRebuildState) -> dict[str, Any]:
-    """Role 9 — bounded correction only; no unrelated refactors."""
+    """Role 9 — Fixer: bounded correction only; no unrelated refactors."""
     current = state.get("fix_round", 0) + 1
     max_rounds = state.get("max_fix_rounds", 3)
     if current > max_rounds:
@@ -387,20 +345,19 @@ def fixer(state: UIRebuildState) -> dict[str, Any]:
 
     page = state.get("current_page")
     if page is None:
-        return {}
+        return {"fix_round": current}
     report = run_fixer_agent(
         model_name=_require_model(state),
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
-        page=dict(page),
-        review_findings=[dict(item) for item in state.get("review_findings", [])],
+        page=page,
+        review_findings=state.get("review_findings", []),
     )
     return {
         "fix_round": current,
-        "fixer_report": report,
-        "changed_files": changed_source_files(state["source_repo_root"]),
         "verification_findings": [],
         "review_findings": [],
+        "changed_files": changed_source_files(state["source_repo_root"]),
         "current_page_status": "fix_applied" if report["status"] == "COMPLETE" else "fix_blocked",
     }
 
@@ -436,6 +393,7 @@ def human_gate(state: UIRebuildState) -> dict[str, Any]:
         "completed_pages": len(state.get("completed_pages", [])),
         "total_pages": len(state.get("page_queue", TARGET_PAGES)),
         "changed_files": state.get("changed_files", []),
+        "validation_results": state.get("validation_results", []),
         "final_findings": state.get("final_findings", []),
         "question": "Approve this UI rebuild run for release processing?",
     })
@@ -443,12 +401,12 @@ def human_gate(state: UIRebuildState) -> dict[str, Any]:
 
 
 def release_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 10 — Release Agent never publishes until explicit Git release tools are wired."""
+    """Role 10 — Release Agent: release only approved work."""
     if not state.get("human_decision"):
         return {"release_status": "rejected", "phase": "done"}
     if state.get("execution_mode", "dry_run") == "dry_run":
         return {"release_status": "dry_run_complete_no_git_write", "phase": "done"}
     return {
-        "release_status": "write_complete_pending_manual_git_release",
+        "release_status": "approved_local_changes_no_git_publish",
         "phase": "done",
     }

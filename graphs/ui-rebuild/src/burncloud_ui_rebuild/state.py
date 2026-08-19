@@ -24,7 +24,60 @@ class Finding(TypedDict):
     expected: NotRequired[str]
 
 
+class InvocationUsage(TypedDict, total=False):
+    role: str
+    model_calls: int
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+class BudgetUsage(TypedDict, total=False):
+    agent_invocations: int
+    model_calls: int
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    page_started_at: float
+    run_started_at: float
+    exhausted_reason: str
+
+
+class RunContext(TypedDict, total=False):
+    run_id: str
+    started_at: float
+    base_branch: str
+    base_commit: str
+    agent_branch: str
+    worktree_root: str
+    model_name: str
+    page_limit: int
+
+
+class PageContext(TypedDict, total=False):
+    page_id: str
+    role: WorkspaceRole
+    route: str
+    contract_path: str
+    started_at: float
+    baseline_commit: str
+    baseline_dirty_files: list[str]
+    scout_report: dict[str, Any]
+    implementation_plan: dict[str, Any]
+    plan_round: int
+    allowed_files: list[str]
+    checkpoint_commit: str
+
+
+class RecoveryRequest(TypedDict, total=False):
+    target_commit: str
+    confirmed: bool
+
+
 class UIRebuildState(TypedDict, total=False):
+    # Stable top-level compatibility fields used by the existing graph/runtime.
     thread_id: str
     execution_mode: ExecutionMode
     model_name: str
@@ -40,6 +93,14 @@ class UIRebuildState(TypedDict, total=False):
     workbench_root: str
     max_fix_rounds: int
 
+    # Layered v1 state. Nodes should pass the smallest relevant slice to each Agent.
+    run_context: RunContext
+    page_context: PageContext
+    budget_usage: BudgetUsage
+    invocation_history: list[InvocationUsage]
+    recovery_request: RecoveryRequest
+    recovery_result: dict[str, Any]
+
     specs: dict[str, dict[str, str]]
     page_queue: list[PageTask]
 
@@ -54,6 +115,10 @@ class UIRebuildState(TypedDict, total=False):
     current_page_status: str
     completed_pages: list[str]
     implementation_results: list[dict[str, Any]]
+    scout_report: dict[str, Any]
+    implementation_plan: dict[str, Any]
+    plan_findings: list[Finding]
+    plan_round: int
     builder_report: dict[str, Any]
     fixer_report: dict[str, Any]
     review_summary: str

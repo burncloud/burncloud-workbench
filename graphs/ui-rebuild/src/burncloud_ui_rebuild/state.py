@@ -35,6 +35,7 @@ class UIRebuildState(TypedDict, total=False):
     base_commit: str
     agent_branch: str
     worktree_root: str
+    worktree_reused: bool
     source_repo_root: str
     workbench_root: str
     max_fix_rounds: int

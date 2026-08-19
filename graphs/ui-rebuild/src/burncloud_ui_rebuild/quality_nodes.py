@@ -39,12 +39,13 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
             if result["returncode"] != 0:
                 findings.append(Finding(severity="blocker", code=f"VALIDATION_{name.upper()}", message=f"Code validation failed: {name}", evidence=str(result["output"]), expected="returncode 0"))
 
-    return {
+    update: dict[str, Any] = {
         "verification_findings": findings,
         "validation_results": results,
         "changed_files": _changed_files(state),
         "current_page_status": "code_verified" if not blocking_findings(findings) else "verification_failed",
     }
+    return apply_budget_guard(state, update)
 
 
 def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
@@ -63,13 +64,14 @@ def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
         "browser_e2e": "capability_missing_not_silently_passed",
         "note": "BurnCloud currently has no repository browser-E2E suite for this Harness to invoke deterministically.",
     }
-    return {
+    update: dict[str, Any] = {
         "verification_findings": findings,
         "validation_results": results,
         "reality_report": report,
         "changed_files": _changed_files(state),
         "current_page_status": "reality_passed" if not blocking_findings(findings) else "reality_failed",
     }
+    return apply_budget_guard(state, update)
 
 
 def policy_reviewer(state: UIRebuildState) -> dict[str, Any]:

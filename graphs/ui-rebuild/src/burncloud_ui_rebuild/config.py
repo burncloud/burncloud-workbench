@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 
 
+DEFAULT_MODEL_NAME = "gpt-5.6-sol"
+
+
 def workbench_root() -> Path:
     configured = os.environ.get("BURNCLOUD_WORKBENCH_ROOT")
     if configured:

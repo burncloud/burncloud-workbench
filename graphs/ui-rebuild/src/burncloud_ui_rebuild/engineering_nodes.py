@@ -8,18 +8,15 @@ from .coding_tools import (
     changed_source_files,
     checkpoint_history,
     head_commit,
+    normalize_repo_path,
     restore_page_checkpoint,
 )
-from .engineering_agents import (
-    run_page_scout_agent,
-    run_planned_builder_agent,
-    run_planner_agent,
-)
+from .engineering_agents import run_page_scout_agent, run_planned_builder_agent, run_planner_agent
 from .policy import DEFAULT_POLICY, path_is_page_writable
 from .state import Finding, UIRebuildState
 
 
-def _usage_without_role(usage: dict[str, Any]) -> dict[str, int]:
+def _usage_values(usage: dict[str, Any]) -> dict[str, int]:
     return {
         "model_calls": int(usage.get("model_calls", 0) or 0),
         "tool_calls": int(usage.get("tool_calls", 0) or 0),
@@ -30,17 +27,16 @@ def _usage_without_role(usage: dict[str, Any]) -> dict[str, int]:
 
 
 def accumulate_usage(state: UIRebuildState, usage: dict[str, Any]) -> dict[str, Any]:
-    """Accumulate Agent usage into run/page budgets using provider usage metadata when available."""
     current = dict(state.get("budget_usage", {}))
-    values = _usage_without_role(usage)
     current["agent_invocations"] = int(current.get("agent_invocations", 0)) + 1
     current["page_agent_invocations"] = int(current.get("page_agent_invocations", 0)) + 1
-    for key, value in values.items():
+    for key, value in _usage_values(usage).items():
         current[key] = int(current.get(key, 0)) + value
-        page_key = f"page_{key}"
-        current[page_key] = int(current.get(page_key, 0)) + value
-    history = [*state.get("invocation_history", []), dict(usage)]
-    return {"budget_usage": current, "invocation_history": history}
+        current[f"page_{key}"] = int(current.get(f"page_{key}", 0)) + value
+    return {
+        "budget_usage": current,
+        "invocation_history": [*state.get("invocation_history", []), dict(usage)],
+    }
 
 
 def budget_reason(state: UIRebuildState, *, now: float | None = None) -> str:
@@ -48,7 +44,6 @@ def budget_reason(state: UIRebuildState, *, now: float | None = None) -> str:
     now = now if now is not None else time.time()
     run_started = float(usage.get("run_started_at", now))
     page_started = float(usage.get("page_started_at", now))
-
     if now - run_started > DEFAULT_POLICY.max_run_seconds:
         return f"Run wall-clock budget exceeded {DEFAULT_POLICY.max_run_seconds}s."
     if now - page_started > DEFAULT_POLICY.max_page_seconds:
@@ -58,21 +53,16 @@ def budget_reason(state: UIRebuildState, *, now: float | None = None) -> str:
     if int(usage.get("page_total_tokens", 0)) > DEFAULT_POLICY.max_page_tokens:
         return f"Page token budget exceeded {DEFAULT_POLICY.max_page_tokens}."
     if int(usage.get("page_agent_invocations", 0)) > DEFAULT_POLICY.max_agent_invocations_per_page:
-        return (
-            "Page Agent invocation budget exceeded "
-            f"{DEFAULT_POLICY.max_agent_invocations_per_page}."
-        )
+        return f"Page Agent invocation budget exceeded {DEFAULT_POLICY.max_agent_invocations_per_page}."
     return ""
 
 
 def apply_budget_guard(state: UIRebuildState, update: dict[str, Any]) -> dict[str, Any]:
-    """Merge an Agent-node update and convert budget exhaustion into a deterministic blocker."""
     merged = dict(state)
     merged.update(update)
     reason = budget_reason(merged)
     if not reason:
         return update
-
     usage = dict(merged.get("budget_usage", {}))
     usage["exhausted_reason"] = reason
     findings = list(merged.get("verification_findings", []))
@@ -93,14 +83,10 @@ def initialize_run_context(state: UIRebuildState) -> dict[str, Any]:
     now = time.time()
     usage = dict(state.get("budget_usage", {}))
     usage.setdefault("run_started_at", now)
-    usage.setdefault("agent_invocations", 0)
-    usage.setdefault("model_calls", 0)
-    usage.setdefault("tool_calls", 0)
-    usage.setdefault("input_tokens", 0)
-    usage.setdefault("output_tokens", 0)
-    usage.setdefault("total_tokens", 0)
+    for key in ("agent_invocations", "model_calls", "tool_calls", "input_tokens", "output_tokens", "total_tokens"):
+        usage.setdefault(key, 0)
     context = {
-        "run_id": state.get("thread_id", "burncloud-ui-rebuild-v1"),
+        "run_id": state.get("thread_id", "burncloud-graph-engineering-v1"),
         "started_at": usage["run_started_at"],
         "base_branch": state.get("base_branch", "main"),
         "base_commit": state.get("base_commit", ""),
@@ -113,10 +99,8 @@ def initialize_run_context(state: UIRebuildState) -> dict[str, Any]:
 
 
 def recovery_node(state: UIRebuildState) -> dict[str, Any]:
-    """Synchronize Git checkpoint history and optionally restore a confirmed checkpoint."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"recovery_result": {"status": "dry_run"}}
-
     root = state.get("source_repo_root", "")
     if not root:
         return {"recovery_result": {"status": "no_worktree"}}
@@ -124,13 +108,12 @@ def recovery_node(state: UIRebuildState) -> dict[str, Any]:
     history = checkpoint_history(root)
     request = dict(state.get("recovery_request", {}))
     target = str(request.get("target_commit", "")).strip()
-    confirmed = bool(request.get("confirmed", False))
     if not target:
         return {
             "page_checkpoint_history": history,
             "recovery_result": {"status": "not_requested", "known_checkpoints": len(history)},
         }
-    if not confirmed:
+    if not bool(request.get("confirmed", False)):
         return {
             "page_checkpoint_history": history,
             "recovery_result": {"status": "confirmation_required", "target_commit": target},
@@ -163,25 +146,22 @@ def start_page_context(state: UIRebuildState) -> dict[str, Any]:
         return {}
     now = time.time()
     root = state["source_repo_root"]
+    exists = Path(root).exists()
     context = {
         "page_id": page["id"],
         "role": page["role"],
         "route": page["route"],
         "contract_path": page["contract_path"],
         "started_at": now,
-        "baseline_commit": head_commit(root) if Path(root).exists() else "",
-        "baseline_dirty_files": changed_source_files(root) if Path(root).exists() else [],
+        "baseline_commit": head_commit(root) if exists and state.get("execution_mode") == "write" else "",
+        "baseline_dirty_files": changed_source_files(root) if exists and state.get("execution_mode") == "write" else [],
         "plan_round": 0,
         "allowed_files": [],
     }
     usage = dict(state.get("budget_usage", {}))
     usage["page_started_at"] = now
-    usage["page_agent_invocations"] = 0
-    usage["page_model_calls"] = 0
-    usage["page_tool_calls"] = 0
-    usage["page_input_tokens"] = 0
-    usage["page_output_tokens"] = 0
-    usage["page_total_tokens"] = 0
+    for key in ("agent_invocations", "model_calls", "tool_calls", "input_tokens", "output_tokens", "total_tokens"):
+        usage[f"page_{key}"] = 0
     return {
         "page_context": context,
         "budget_usage": usage,
@@ -222,7 +202,7 @@ def page_scout_node(state: UIRebuildState) -> dict[str, Any]:
         page=page,
     )
     usage = dict(report.pop("_usage", {}))
-    update = {
+    update: dict[str, Any] = {
         "scout_report": report,
         "current_page_status": "scouted" if report["status"] == "COMPLETE" else "scout_blocked",
     }
@@ -258,7 +238,7 @@ def planner_node(state: UIRebuildState) -> dict[str, Any]:
         previous_plan_findings=list(state.get("plan_findings", [])),
     )
     usage = dict(report.pop("_usage", {}))
-    update = {
+    update: dict[str, Any] = {
         "implementation_plan": report,
         "plan_round": round_no,
         "current_page_status": "planned" if report["status"] == "COMPLETE" else "plan_blocked",
@@ -275,8 +255,8 @@ def planner_node(state: UIRebuildState) -> dict[str, Any]:
 def plan_guard_node(state: UIRebuildState) -> dict[str, Any]:
     plan = dict(state.get("implementation_plan", {}))
     findings: list[Finding] = []
-    allowed = [str(path).replace("\\", "/").lstrip("./") for path in plan.get("allowed_files", [])]
-    allowed = list(dict.fromkeys(allowed))
+    raw_allowed = [str(path) for path in plan.get("allowed_files", [])]
+    allowed: list[str] = []
 
     if plan.get("status") != "COMPLETE":
         findings.append(Finding(
@@ -285,6 +265,21 @@ def plan_guard_node(state: UIRebuildState) -> dict[str, Any]:
             message="Planner did not produce a complete implementation plan.",
             evidence=str(plan.get("summary", "")),
         ))
+
+    for raw_path in raw_allowed:
+        raw = raw_path.replace("\\", "/").strip()
+        path_obj = Path(raw)
+        normalized = normalize_repo_path(raw)
+        if path_obj.is_absolute() or any(part in {"..", ".git"} for part in path_obj.parts):
+            findings.append(Finding(
+                severity="blocker",
+                code="PLAN_UNSAFE_PATH",
+                message=f"Unsafe planned path: {raw_path}",
+            ))
+            continue
+        allowed.append(normalized)
+
+    allowed = list(dict.fromkeys(allowed))
     if len(allowed) > DEFAULT_POLICY.max_plan_files:
         findings.append(Finding(
             severity="blocker",
@@ -293,13 +288,7 @@ def plan_guard_node(state: UIRebuildState) -> dict[str, Any]:
             expected="Reduce the page to the smallest correct client-side change.",
         ))
     for path in allowed:
-        if not path or path.startswith("/") or ".." in Path(path).parts or ".git" in Path(path).parts:
-            findings.append(Finding(
-                severity="blocker",
-                code="PLAN_UNSAFE_PATH",
-                message=f"Unsafe planned path: {path}",
-            ))
-        elif not path_is_page_writable(path):
+        if not path_is_page_writable(path):
             findings.append(Finding(
                 severity="major",
                 code="PLAN_OUTSIDE_UI_SCOPE",
@@ -307,12 +296,24 @@ def plan_guard_node(state: UIRebuildState) -> dict[str, Any]:
                 expected=f"Writable prefixes: {DEFAULT_POLICY.page_write_prefixes}. Report backend requirements as BackendGap.",
             ))
 
-    step_files = {
-        str(step.get("file", "")).replace("\\", "/").lstrip("./")
-        for step in plan.get("steps", [])
-        if isinstance(step, dict)
-    }
-    unapproved_steps = sorted(path for path in step_files if path and path not in set(allowed))
+    step_files: set[str] = set()
+    for step in plan.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        raw = str(step.get("file", ""))
+        raw_path = Path(raw.replace("\\", "/").strip())
+        if raw_path.is_absolute() or any(part in {"..", ".git"} for part in raw_path.parts):
+            findings.append(Finding(
+                severity="blocker",
+                code="PLAN_STEP_UNSAFE_PATH",
+                message=f"Unsafe plan-step path: {raw}",
+            ))
+            continue
+        normalized = normalize_repo_path(raw)
+        if normalized:
+            step_files.add(normalized)
+
+    unapproved_steps = sorted(path for path in step_files if path not in set(allowed))
     if unapproved_steps:
         findings.append(Finding(
             severity="blocker",
@@ -353,7 +354,7 @@ def planned_builder_node(state: UIRebuildState) -> dict[str, Any]:
         implementation_plan=state.get("implementation_plan", {}),
     )
     usage = dict(report.pop("_usage", {}))
-    update = {
+    update: dict[str, Any] = {
         "builder_report": report,
         "changed_files": changed_source_files(state["source_repo_root"]),
         "current_page_status": "built" if report["status"] == "COMPLETE" else "builder_blocked",
@@ -363,8 +364,11 @@ def planned_builder_node(state: UIRebuildState) -> dict[str, Any]:
 
 
 def scope_guard_node(state: UIRebuildState) -> dict[str, Any]:
+    if state.get("execution_mode", "dry_run") != "write":
+        return {"changed_files": [], "verification_findings": [], "current_page_status": "scope_passed"}
+
     allowed = {
-        str(path).replace("\\", "/").lstrip("./")
+        normalize_repo_path(str(path))
         for path in state.get("implementation_plan", {}).get("allowed_files", [])
     }
     changed = changed_source_files(state["source_repo_root"])
@@ -394,9 +398,8 @@ def scope_guard_node(state: UIRebuildState) -> dict[str, Any]:
                 expected="Backend work must be escalated as a separate capability task.",
             ))
 
-    blocking = bool(findings)
     return {
         "changed_files": changed,
         "verification_findings": findings,
-        "current_page_status": "scope_failed" if blocking else "scope_passed",
+        "current_page_status": "scope_failed" if findings else "scope_passed",
     }

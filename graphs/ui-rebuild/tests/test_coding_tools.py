@@ -28,6 +28,37 @@ def test_read_only_toolset_has_no_source_write_tools(tmp_path):
     assert "read_workbench_file" in tools
     assert "replace_source_text" not in tools
     assert "create_source_file" not in tools
+    assert "format_client" not in tools
+
+
+def test_discovery_tools_return_recoverable_not_found(tmp_path):
+    source = tmp_path / "burncloud"
+    workbench = tmp_path / "burncloud-workbench"
+    source.mkdir()
+    workbench.mkdir()
+
+    tools = _tool_map(source, workbench, allow_write=False)
+
+    read_result = tools["read_source_file"].invoke({"path": "missing/file.rs"})
+    list_result = tools["list_source_directory"].invoke({"path": "missing-dir"})
+    search_result = tools["search_source"].invoke({"query": "billing", "path": "missing-dir"})
+
+    assert "NOT_FOUND: missing/file.rs" in read_result
+    assert "recoverable discovery miss" in read_result
+    assert "NOT_FOUND: missing-dir" in list_result
+    assert "NOT_FOUND: missing-dir" in search_result
+
+
+def test_discovery_tools_keep_security_errors_hard(tmp_path):
+    source = tmp_path / "burncloud"
+    workbench = tmp_path / "burncloud-workbench"
+    source.mkdir()
+    workbench.mkdir()
+
+    tools = _tool_map(source, workbench, allow_write=False)
+
+    with pytest.raises(ToolSafetyError):
+        tools["read_source_file"].invoke({"path": "../secret.txt"})
 
 
 def test_write_tools_are_confined_to_source_root(tmp_path):

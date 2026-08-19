@@ -170,7 +170,10 @@ def build_coding_tools(
             return _recoverable_path_error("NOT_FOUND", path)
         if not target.is_file():
             return _recoverable_path_error("NOT_A_FILE", path)
-        return _read_lines(target, start_line, end_line)
+        try:
+            return _read_lines(target, start_line, end_line)
+        except ValueError as exc:
+            return f"INVALID_READ_RANGE: {exc}"
 
     @tool("read_workbench_file")
     def read_workbench_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
@@ -180,7 +183,10 @@ def build_coding_tools(
             return _recoverable_path_error("NOT_FOUND", path)
         if not target.is_file():
             return _recoverable_path_error("NOT_A_FILE", path)
-        return _read_lines(target, start_line, end_line)
+        try:
+            return _read_lines(target, start_line, end_line)
+        except ValueError as exc:
+            return f"INVALID_READ_RANGE: {exc}"
 
     @tool("list_source_directory")
     def list_source_directory(path: str = ".") -> str:
@@ -202,9 +208,9 @@ def build_coding_tools(
     def search_source(query: str, path: str = ".", max_results: int = 80) -> str:
         """Case-insensitive literal search across text source files. Returns path, line number, and matching line. Missing search roots are recoverable discovery results."""
         if not query.strip():
-            raise ValueError("query must not be empty")
+            return "INVALID_ARGUMENT: query must not be empty"
         if max_results < 1 or max_results > 200:
-            raise ValueError("max_results must be between 1 and 200")
+            return "INVALID_ARGUMENT: max_results must be between 1 and 200"
         start = _safe_path(source, path, allow_missing=True)
         if not start.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -240,7 +246,10 @@ def build_coding_tools(
     @tool("run_validation")
     def run_validation(name: str) -> str:
         """Run one allowlisted validation: cargo_fmt_check, client_check, or client_test. Arbitrary shell commands are forbidden."""
-        return str(run_named_validation(source, name))
+        try:
+            return str(run_named_validation(source, name))
+        except ToolSafetyError as exc:
+            return f"VALIDATION_REFUSED: {exc}"
 
     tools = [
         read_source_file,
@@ -255,29 +264,35 @@ def build_coding_tools(
     if allow_write:
         @tool("replace_source_text")
         def replace_source_text(path: str, old: str, new: str, expected_occurrences: int = 1) -> str:
-            """Safely edit an existing BurnCloud source file by exact text replacement. Use small, targeted replacements only."""
+            """Safely edit an existing BurnCloud source file by exact text replacement. Routine mismatches are returned to the Agent for recovery; security boundary violations still fail hard."""
             if not old:
-                raise ValueError("old must not be empty")
+                return "INVALID_ARGUMENT: old must not be empty"
             if expected_occurrences < 1 or expected_occurrences > 20:
-                raise ValueError("expected_occurrences must be between 1 and 20")
-            target = _safe_path(source, path)
+                return "INVALID_ARGUMENT: expected_occurrences must be between 1 and 20"
+            target = _safe_path(source, path, allow_missing=True)
+            if not target.exists():
+                return _recoverable_path_error("NOT_FOUND", path)
             if not target.is_file():
-                raise ToolSafetyError("replace_source_text requires an existing file.")
+                return _recoverable_path_error("NOT_A_FILE", path)
             text = target.read_text(encoding="utf-8")
             actual = text.count(old)
             if actual != expected_occurrences:
-                raise ToolSafetyError(
-                    f"Replacement refused: expected {expected_occurrences} exact occurrence(s), found {actual}."
+                return (
+                    f"REPLACEMENT_REFUSED: expected {expected_occurrences} exact occurrence(s), found {actual}.\n"
+                    "Re-read the current file, choose a smaller exact anchor, and retry."
                 )
             target.write_text(text.replace(old, new, expected_occurrences), encoding="utf-8")
             return f"UPDATED {target.relative_to(source).as_posix()} ({expected_occurrences} replacement(s))"
 
         @tool("create_source_file")
         def create_source_file(path: str, content: str) -> str:
-            """Create a new UTF-8 file inside BurnCloud source. Existing files cannot be overwritten with this tool."""
+            """Create a new UTF-8 file inside BurnCloud source. Existing paths are returned as a recoverable refusal; security boundary violations still fail hard."""
             target = _safe_path(source, path, allow_missing=True)
             if target.exists():
-                raise ToolSafetyError("create_source_file refuses to overwrite an existing path.")
+                return (
+                    f"CREATE_REFUSED: {path} already exists.\n"
+                    "Read the existing file and use replace_source_text if a change is required."
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return f"CREATED {target.relative_to(source).as_posix()}"

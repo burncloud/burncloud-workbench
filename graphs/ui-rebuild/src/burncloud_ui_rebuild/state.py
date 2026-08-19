@@ -34,14 +34,20 @@ class InvocationUsage(TypedDict, total=False):
 
 
 class BudgetUsage(TypedDict, total=False):
+    run_started_at: float
+    page_started_at: float
     agent_invocations: int
     model_calls: int
     tool_calls: int
     input_tokens: int
     output_tokens: int
     total_tokens: int
-    page_started_at: float
-    run_started_at: float
+    page_agent_invocations: int
+    page_model_calls: int
+    page_tool_calls: int
+    page_input_tokens: int
+    page_output_tokens: int
+    page_total_tokens: int
     exhausted_reason: str
 
 
@@ -77,7 +83,7 @@ class RecoveryRequest(TypedDict, total=False):
 
 
 class UIRebuildState(TypedDict, total=False):
-    # Stable top-level compatibility fields used by the existing graph/runtime.
+    # Stable runtime fields.
     thread_id: str
     execution_mode: ExecutionMode
     model_name: str
@@ -93,7 +99,7 @@ class UIRebuildState(TypedDict, total=False):
     workbench_root: str
     max_fix_rounds: int
 
-    # Layered v1 state. Nodes should pass the smallest relevant slice to each Agent.
+    # Layered Graph Engineering state.
     run_context: RunContext
     page_context: PageContext
     budget_usage: BudgetUsage
@@ -103,7 +109,6 @@ class UIRebuildState(TypedDict, total=False):
 
     specs: dict[str, dict[str, str]]
     page_queue: list[PageTask]
-
     repo_evidence: dict[str, Any]
     current_routes: list[str]
     source_baseline_status: str
@@ -115,6 +120,7 @@ class UIRebuildState(TypedDict, total=False):
     current_page_status: str
     completed_pages: list[str]
     implementation_results: list[dict[str, Any]]
+
     scout_report: dict[str, Any]
     implementation_plan: dict[str, Any]
     plan_findings: list[Finding]
@@ -122,8 +128,10 @@ class UIRebuildState(TypedDict, total=False):
     builder_report: dict[str, Any]
     fixer_report: dict[str, Any]
     review_summary: str
+
     changed_files: list[str]
     validation_results: list[dict[str, Any]]
+    reality_report: dict[str, Any]
     verification_findings: list[Finding]
     review_findings: list[Finding]
     last_verification_findings: list[Finding]

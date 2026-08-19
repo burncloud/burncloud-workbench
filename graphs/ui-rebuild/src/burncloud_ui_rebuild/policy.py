@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Iterable, Mapping
 
 
@@ -21,7 +22,6 @@ class HarnessPolicy:
     validation requirements, protected scopes and escalation behavior.
     """
 
-    # Run/page orchestration.
     default_page_limit: int = 1
     max_fix_rounds: int = 3
     max_plan_rounds: int = 2
@@ -31,19 +31,16 @@ class HarnessPolicy:
     max_run_tokens: int = 1_000_000
     max_agent_invocations_per_page: int = 12
 
-    # Source/tool boundaries.
     max_write_files_per_agent: int = 8
     max_plan_files: int = 8
     max_tool_output_chars: int = 40_000
     max_read_lines: int = 500
     page_write_prefixes: tuple[str, ...] = ("crates/client/",)
 
-    # Review policy.
     blocking_review_severities: frozenset[str] = field(
         default_factory=lambda: frozenset({"blocker", "major"})
     )
 
-    # Deterministic anchors. These mirror the production client CI at increasing depth.
     code_validations: tuple[str, ...] = (
         "cargo_fmt_check",
         "client_check",
@@ -54,7 +51,6 @@ class HarnessPolicy:
         "application_integration_check",
     )
 
-    # LLM-node budgets. Keep Scout/Planner smaller than Builder.
     scout_budget: AgentBudget = AgentBudget(max_model_calls=8, max_tool_calls=20)
     planner_budget: AgentBudget = AgentBudget(max_model_calls=8, max_tool_calls=20)
     builder_budget: AgentBudget = AgentBudget(max_model_calls=18, max_tool_calls=40)
@@ -74,5 +70,10 @@ def blocking_findings(findings: Iterable[Mapping[str, object]]) -> list[Mapping[
 
 
 def path_is_page_writable(path: str) -> bool:
-    normalized = path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    candidate = PurePosixPath(normalized)
+    if candidate.is_absolute() or any(part in {"..", ".git"} for part in candidate.parts):
+        return False
     return any(normalized.startswith(prefix) for prefix in DEFAULT_POLICY.page_write_prefixes)

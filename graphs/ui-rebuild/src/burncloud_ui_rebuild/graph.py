@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from burncloud_ui_rebuild.config import source_root, workbench_root
+from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root, workbench_root
 from burncloud_ui_rebuild.nodes import (
     architecture_agent,
     bootstrap,
@@ -10,6 +10,7 @@ from burncloud_ui_rebuild.nodes import (
     human_gate,
     mark_page_complete,
     permission_guardian,
+    prepare_worktree,
     release_agent,
     repo_scout,
     select_next_page,
@@ -32,12 +33,11 @@ def build_graph(checkpointer=None):
     page_rebuild = build_page_graph()
     builder = StateGraph(UIRebuildState)
 
-    # Role 1 — Orchestrator is the parent graph itself. It schedules work but
-    # does not invent product or permission decisions.
     builder.add_node("bootstrap", bootstrap)
     builder.add_node("spec_agent", spec_agent)
     builder.add_node("repo_scout", repo_scout)
     builder.add_node("permission_guardian", permission_guardian)
+    builder.add_node("prepare_worktree", prepare_worktree)
     builder.add_node("write_preflight", write_preflight)
     builder.add_node("architecture_agent", architecture_agent)
     builder.add_node("select_next_page", select_next_page)
@@ -51,7 +51,8 @@ def build_graph(checkpointer=None):
     builder.add_edge("bootstrap", "spec_agent")
     builder.add_edge("spec_agent", "repo_scout")
     builder.add_edge("repo_scout", "permission_guardian")
-    builder.add_edge("permission_guardian", "write_preflight")
+    builder.add_edge("permission_guardian", "prepare_worktree")
+    builder.add_edge("prepare_worktree", "write_preflight")
     builder.add_edge("write_preflight", "architecture_agent")
     builder.add_edge("architecture_agent", "select_next_page")
 
@@ -79,14 +80,18 @@ def build_graph(checkpointer=None):
 def initial_state(
     *,
     execution_mode: str = "dry_run",
-    thread_id: str = "burncloud-ui-rebuild-v0.1",
-    model_name: str = "",
+    thread_id: str = "burncloud-ui-rebuild-v0.3",
+    model_name: str = DEFAULT_MODEL_NAME,
     page_limit: int | None = None,
 ) -> UIRebuildState:
+    base_repo = str(source_root())
     state: UIRebuildState = {
         "thread_id": thread_id,
         "execution_mode": execution_mode,  # type: ignore[typeddict-item]
-        "source_repo_root": str(source_root()),
+        "model_name": model_name or DEFAULT_MODEL_NAME,
+        "base_repo_root": base_repo,
+        "base_branch": "main",
+        "source_repo_root": base_repo,
         "workbench_root": str(workbench_root()),
         "max_fix_rounds": 3,
         "completed_pages": [],
@@ -94,8 +99,6 @@ def initial_state(
         "warnings": [],
         "phase": "start",
     }
-    if model_name:
-        state["model_name"] = model_name
     if page_limit is not None:
         state["page_limit"] = page_limit
     return state

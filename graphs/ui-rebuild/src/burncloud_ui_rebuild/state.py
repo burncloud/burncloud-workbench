@@ -60,6 +60,9 @@ class UIRebuildState(TypedDict, total=False):
     validation_results: list[dict[str, Any]]
     verification_findings: list[Finding]
     review_findings: list[Finding]
+    last_verification_findings: list[Finding]
+    last_review_findings: list[Finding]
+    last_failure_reason: str
     fix_round: int
 
     final_findings: list[Finding]

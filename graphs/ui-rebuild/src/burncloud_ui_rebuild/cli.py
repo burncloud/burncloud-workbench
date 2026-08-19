@@ -6,16 +6,32 @@ import json
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from burncloud_ui_rebuild.agents import run_agent_check
 from burncloud_ui_rebuild.graph import build_graph, initial_state
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="BurnCloud UI Rebuild LangGraph")
     sub = parser.add_subparsers(dest="command", required=True)
+
     dry = sub.add_parser("dry-run", help="Run all roles without modifying burncloud/burncloud.")
     dry.add_argument("--thread-id", default="burncloud-ui-rebuild-v0.1")
     dry.add_argument("--approve", action="store_true", help="Automatically approve the final human gate.")
+
+    check = sub.add_parser(
+        "agent-check",
+        help="Verify create_agent model access and tool calling without modifying source files.",
+    )
+    check.add_argument("--model", required=True, help="Model name exposed by the configured BASE_URL endpoint.")
+
     args = parser.parse_args()
+
+    if args.command == "agent-check":
+        result = run_agent_check(args.model)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result["status"] != "PASS":
+            raise SystemExit(1)
+        return
 
     if args.command == "dry-run":
         graph = build_graph(checkpointer=InMemorySaver())

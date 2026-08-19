@@ -29,6 +29,12 @@ class UIRebuildState(TypedDict, total=False):
     execution_mode: ExecutionMode
     model_name: str
     page_limit: int
+
+    base_repo_root: str
+    base_branch: str
+    base_commit: str
+    agent_branch: str
+    worktree_root: str
     source_repo_root: str
     workbench_root: str
     max_fix_rounds: int

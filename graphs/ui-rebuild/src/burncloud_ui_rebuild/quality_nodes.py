@@ -5,9 +5,9 @@ from typing import Any
 
 from langgraph.types import interrupt
 
-from .agents import run_fixer_agent
 from .coding_tools import changed_source_files, create_page_checkpoint, run_named_validation
-from .nodes import reviewer as base_reviewer
+from .engineering_agents import run_v1_fixer_agent, run_v1_reviewer_agent
+from .engineering_nodes import accumulate_usage, apply_budget_guard
 from .policy import DEFAULT_POLICY, blocking_findings
 from .state import Finding, UIRebuildState
 
@@ -15,7 +15,7 @@ from .state import Finding, UIRebuildState
 def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     """Deterministic code-level gate owned entirely by HarnessPolicy."""
     page = state.get("current_page")
-    findings: list[Finding] = []
+    findings = list(state.get("verification_findings", []))
     results: list[dict[str, Any]] = []
     if page is None:
         return {"verification_findings": findings, "validation_results": results}
@@ -60,7 +60,13 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
 
 
 def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
-    """Deterministic runtime-adjacent anchor that executes real client tests."""
+    """Deterministic integration anchor outside the LLM loop.
+
+    v1 executes tests plus the same LiveView/application integration compile checks
+    used by BurnCloud's production client CI. Browser automation is not invented:
+    when no browser-E2E suite exists in the source repository, that capability is
+    reported explicitly rather than treated as a silent pass.
+    """
     findings = list(state.get("verification_findings", []))
     results = list(state.get("validation_results", []))
 
@@ -77,47 +83,64 @@ def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
                     expected="returncode 0",
                 ))
 
+    report = {
+        "deterministic_validations": list(DEFAULT_POLICY.reality_validations),
+        "browser_e2e": "capability_missing_not_silently_passed",
+        "note": "BurnCloud currently has no repository browser-E2E suite for this Harness to invoke deterministically.",
+    }
     return {
         "verification_findings": findings,
         "validation_results": results,
+        "reality_report": report,
         "changed_files": changed_source_files(state["source_repo_root"]),
         "current_page_status": "reality_passed" if not blocking_findings(findings) else "reality_failed",
     }
 
 
 def policy_reviewer(state: UIRebuildState) -> dict[str, Any]:
-    """Independent reviewer with severity policy applied by Python, not by the LLM."""
-    result = dict(base_reviewer(state))
-    findings = list(result.get("review_findings", []))
+    """Independent reviewer with severity policy applied by Python, never by self-review."""
+    page = state.get("current_page")
+    if page is None:
+        return {"review_findings": []}
+    if state.get("execution_mode", "dry_run") == "dry_run":
+        return {"review_findings": [], "review_summary": "Dry-run review.", "current_page_status": "review_passed"}
+
+    report = run_v1_reviewer_agent(
+        model_name=state["model_name"],
+        source_root=state["source_repo_root"],
+        workbench_root=state["workbench_root"],
+        page=page,
+        scout_report=state.get("scout_report", {}),
+        implementation_plan=state.get("implementation_plan", {}),
+        verification_findings=list(state.get("verification_findings", [])),
+        changed_files=list(state.get("changed_files", [])),
+    )
+    usage = dict(report.pop("_usage", {}))
+    findings = [Finding(**item) for item in report.get("findings", [])]
     blocking = blocking_findings(findings)
     warnings = list(state.get("warnings", []))
-
     if findings and not blocking:
-        warnings.append(
-            "Reviewer returned only minor/info findings; HarnessPolicy allows completion with warnings."
-        )
-        status = "review_passed_with_warnings"
-    elif blocking:
-        status = "review_failed"
-    else:
-        status = "review_passed"
+        warnings.append("Reviewer returned only minor/info findings; v1 policy passes with warnings.")
 
-    result["current_page_status"] = status
-    result["warnings"] = warnings
-    return result
+    update: dict[str, Any] = {
+        "review_findings": findings,
+        "review_summary": str(report.get("summary", "")),
+        "warnings": warnings,
+        "current_page_status": "review_failed" if blocking else ("review_passed_with_warnings" if findings else "review_passed"),
+    }
+    update.update(accumulate_usage(state, usage))
+    return apply_budget_guard(state, update)
 
 
 def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
-    """Bounded Fixer that consumes both deterministic and reviewer findings."""
+    """Bounded Fixer that stays inside the already-approved implementation plan."""
     current = state.get("fix_round", 0) + 1
     max_rounds = state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds)
     if current > max_rounds:
         page = state.get("current_page")
         page_id = page["id"] if page else "unknown"
         warnings = list(state.get("warnings", []))
-        warnings.append(
-            f"Fix loop exhausted after {max_rounds} rounds for {page_id}; escalating to human review."
-        )
+        warnings.append(f"Fix loop exhausted after {max_rounds} rounds for {page_id}; escalating to human review.")
         return {
             "fix_round": max_rounds,
             "current_page_status": "fix_exhausted",
@@ -137,15 +160,17 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
     if page is None:
         return {"fix_round": current}
 
-    report = run_fixer_agent(
-        model_name=state.get("model_name", ""),
+    report = run_v1_fixer_agent(
+        model_name=state["model_name"],
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
         agent_branch=state["agent_branch"],
         page=page,
+        implementation_plan=state.get("implementation_plan", {}),
         verification_findings=list(state.get("verification_findings", [])),
         review_findings=list(state.get("review_findings", [])),
     )
+    usage = dict(report.pop("_usage", {}))
     status = "fix_applied" if report["status"] == "COMPLETE" else "fix_blocked"
     update: dict[str, Any] = {
         "fix_round": current,
@@ -153,64 +178,72 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
         "changed_files": changed_source_files(state["source_repo_root"]),
         "current_page_status": status,
     }
+    update.update(accumulate_usage(state, usage))
     if status == "fix_applied":
         update["verification_findings"] = []
         update["review_findings"] = []
-    return update
+    return apply_budget_guard(state, update)
 
 
 def page_checkpoint(state: UIRebuildState) -> dict[str, Any]:
-    """Create a local Git checkpoint after a page passes all quality gates."""
+    """Create a local Git checkpoint after one page passes every quality gate."""
     page = state.get("current_page")
     if page is None:
         return {}
     if state.get("execution_mode", "dry_run") != "write":
-        return {
-            "page_checkpoint": {
-                "status": "dry_run",
-                "page_id": page["id"],
-            }
-        }
+        return {"page_checkpoint": {"status": "dry_run", "page_id": page["id"]}}
 
     checkpoint = create_page_checkpoint(state["source_repo_root"], page["id"])
     history = list(state.get("page_checkpoint_history", []))
     history.append(checkpoint)
+    page_context = dict(state.get("page_context", {}))
+    page_context["checkpoint_commit"] = str(checkpoint.get("commit", ""))
     return {
         "page_checkpoint": checkpoint,
         "page_checkpoint_history": history,
+        "page_context": page_context,
         "changed_files": changed_source_files(state["source_repo_root"]),
         "phase": "page_checkpointed",
     }
 
 
 def human_review_gate(state: UIRebuildState) -> dict[str, Any]:
-    """Human gate with complete quality, policy and recovery context."""
+    """Human gate with complete Graph Engineering quality, budget and recovery context."""
     decision = interrupt({
-        "type": "burncloud_ui_rebuild_final_gate",
+        "type": "burncloud_graph_engineering_v1_final_gate",
         "execution_mode": state.get("execution_mode", "write"),
         "model_name": state.get("model_name", ""),
         "policy": {
-            "max_fix_rounds": state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds),
+            "max_fix_rounds": DEFAULT_POLICY.max_fix_rounds,
+            "max_plan_rounds": DEFAULT_POLICY.max_plan_rounds,
+            "max_page_seconds": DEFAULT_POLICY.max_page_seconds,
+            "max_run_seconds": DEFAULT_POLICY.max_run_seconds,
+            "max_page_tokens": DEFAULT_POLICY.max_page_tokens,
+            "max_run_tokens": DEFAULT_POLICY.max_run_tokens,
             "blocking_review_severities": sorted(DEFAULT_POLICY.blocking_review_severities),
-            "builder_model_calls": DEFAULT_POLICY.builder_budget.max_model_calls,
-            "builder_tool_calls": DEFAULT_POLICY.builder_budget.max_tool_calls,
-            "reviewer_model_calls": DEFAULT_POLICY.reviewer_budget.max_model_calls,
-            "reviewer_tool_calls": DEFAULT_POLICY.reviewer_budget.max_tool_calls,
-            "fixer_model_calls": DEFAULT_POLICY.fixer_budget.max_model_calls,
-            "fixer_tool_calls": DEFAULT_POLICY.fixer_budget.max_tool_calls,
+            "page_write_prefixes": list(DEFAULT_POLICY.page_write_prefixes),
         },
+        "run_context": state.get("run_context", {}),
+        "page_context": state.get("page_context", {}),
+        "budget_usage": state.get("budget_usage", {}),
+        "invocation_history": state.get("invocation_history", []),
+        "recovery_result": state.get("recovery_result", {}),
         "base_commit": state.get("base_commit", ""),
         "agent_branch": state.get("agent_branch", ""),
         "worktree_root": state.get("worktree_root", ""),
         "worktree_reused": state.get("worktree_reused", False),
         "current_page": state.get("current_page"),
         "current_page_status": state.get("current_page_status", ""),
+        "scout_report": state.get("scout_report", {}),
+        "implementation_plan": state.get("implementation_plan", {}),
+        "plan_findings": state.get("plan_findings", []),
         "fix_round": state.get("fix_round", 0),
         "last_failure_reason": state.get("last_failure_reason", ""),
         "fixer_report": state.get("fixer_report", {}),
         "verification_findings": state.get("verification_findings", []),
         "review_findings": state.get("review_findings", []),
         "validation_results": state.get("validation_results", []),
+        "reality_report": state.get("reality_report", {}),
         "page_checkpoint": state.get("page_checkpoint", {}),
         "page_checkpoint_history": state.get("page_checkpoint_history", []),
         "completed_pages": len(state.get("completed_pages", [])),
@@ -218,6 +251,6 @@ def human_review_gate(state: UIRebuildState) -> dict[str, Any]:
         "changed_files": state.get("changed_files", []),
         "warnings": state.get("warnings", []),
         "final_findings": state.get("final_findings", []),
-        "question": "Approve this UI rebuild run for release processing?",
+        "question": "Approve this bounded v1 UI engineering run for release processing?",
     })
     return {"human_decision": bool(decision)}

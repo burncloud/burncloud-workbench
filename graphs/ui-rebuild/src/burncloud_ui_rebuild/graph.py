@@ -37,10 +37,11 @@ NODE_HUMAN_GATE = "人工审批"
 NODE_RELEASE = "发布"
 
 
-def default_execution_mode(state: UIRebuildState) -> dict[str, str]:
-    """Default Studio/Agent Server runs to live write mode unless explicitly overridden."""
+def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
+    """Default Studio/Agent Server runs to live write mode and one page unless overridden."""
     return {
         "execution_mode": state.get("execution_mode", DEFAULT_EXECUTION_MODE),
+        "page_limit": state.get("page_limit", 1),
     }
 
 
@@ -120,7 +121,7 @@ def initial_state(
     execution_mode: str = DEFAULT_EXECUTION_MODE,
     thread_id: str = "burncloud-ui-rebuild-v0.3",
     model_name: str = DEFAULT_MODEL_NAME,
-    page_limit: int | None = None,
+    page_limit: int | None = 1,
 ) -> UIRebuildState:
     base_repo = str(source_root())
     state: UIRebuildState = {

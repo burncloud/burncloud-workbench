@@ -27,6 +27,8 @@ class Finding(TypedDict):
 class UIRebuildState(TypedDict, total=False):
     thread_id: str
     execution_mode: ExecutionMode
+    model_name: str
+    page_limit: int
     source_repo_root: str
     workbench_root: str
     max_fix_rounds: int
@@ -36,6 +38,7 @@ class UIRebuildState(TypedDict, total=False):
 
     repo_evidence: dict[str, Any]
     current_routes: list[str]
+    source_baseline_status: str
 
     permission_findings: list[Finding]
     architecture_plan: dict[str, Any]
@@ -44,6 +47,10 @@ class UIRebuildState(TypedDict, total=False):
     current_page_status: str
     completed_pages: list[str]
     implementation_results: list[dict[str, Any]]
+    builder_report: dict[str, Any]
+    fixer_report: dict[str, Any]
+    changed_files: list[str]
+    validation_results: list[dict[str, Any]]
     verification_findings: list[Finding]
     review_findings: list[Finding]
     fix_round: int

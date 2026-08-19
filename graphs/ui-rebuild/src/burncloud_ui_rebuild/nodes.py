@@ -8,11 +8,12 @@ from typing import Any
 from langgraph.types import interrupt
 
 from .agents import run_builder_agent, run_fixer_agent, run_reviewer_agent
-from .coding_tools import changed_source_files, git_status, run_named_validation
+from .coding_tools import changed_source_files, run_named_validation
 from .config import DEFAULT_MODEL_NAME, source_root as default_source_root, workbench_root as default_workbench_root
 from .manifest import TARGET_PAGES
 from .permissions import validate_target_manifest
 from .state import Finding, UIRebuildState
+from .worktree import current_branch, porcelain_status, prepare_agent_worktree
 
 
 REQUIRED_SPEC_PATHS = (
@@ -46,11 +47,14 @@ def _require_model(state: UIRebuildState) -> str:
 
 def bootstrap(state: UIRebuildState) -> dict[str, Any]:
     """Populate deterministic defaults so Studio runs can omit routine settings."""
+    base_repo = state.get("base_repo_root") or state.get("source_repo_root") or str(default_source_root())
     return {
         "thread_id": state.get("thread_id", "burncloud-ui-rebuild-studio"),
         "execution_mode": state.get("execution_mode", "dry_run"),
         "model_name": state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
-        "source_repo_root": state.get("source_repo_root") or str(default_source_root()),
+        "base_repo_root": base_repo,
+        "base_branch": state.get("base_branch", "main"),
+        "source_repo_root": state.get("worktree_root") or base_repo,
         "workbench_root": state.get("workbench_root") or str(default_workbench_root()),
         "max_fix_rounds": state.get("max_fix_rounds", 3),
         "completed_pages": list(state.get("completed_pages", [])),
@@ -140,17 +144,62 @@ def permission_guardian(state: UIRebuildState) -> dict[str, Any]:
     return {"permission_findings": findings, "phase": "permission_checked"}
 
 
+def prepare_worktree(state: UIRebuildState) -> dict[str, Any]:
+    """Create or reuse an isolated Agent branch/worktree for live writes."""
+    if state.get("execution_mode", "dry_run") != "write":
+        return {"phase": "worktree_skipped"}
+
+    existing_branch = state.get("agent_branch")
+    existing_root = state.get("worktree_root")
+    if existing_branch and existing_root:
+        root = Path(existing_root).resolve()
+        if not root.exists():
+            raise RuntimeError(f"Recorded Agent worktree no longer exists: {root}")
+        actual = current_branch(root)
+        if actual != existing_branch:
+            raise RuntimeError(
+                f"Recorded Agent worktree branch mismatch: expected {existing_branch!r}, found {actual!r}."
+            )
+        return {"source_repo_root": str(root), "phase": "worktree_reused"}
+
+    prepared = prepare_agent_worktree(
+        state["base_repo_root"],
+        base_branch=state.get("base_branch", "main"),
+    )
+    return {**prepared, "phase": "worktree_prepared"}
+
+
 def write_preflight(state: UIRebuildState) -> dict[str, Any]:
-    """Refuse live Agent writes unless the source tree starts clean."""
+    """Refuse live Agent writes unless they target a clean isolated non-main worktree."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"phase": "write_preflight_skipped"}
-    status = git_status(state["source_repo_root"])
+
+    base = Path(state["base_repo_root"]).resolve()
+    source = Path(state["source_repo_root"]).resolve()
+    expected_branch = state.get("agent_branch", "")
+    if not expected_branch:
+        raise RuntimeError("Live rebuild has no Agent branch; prepare_worktree must run first.")
+    if source == base:
+        raise RuntimeError("Direct writes to the primary BurnCloud checkout are forbidden; an Agent worktree is required.")
+
+    actual_branch = current_branch(source)
+    if actual_branch in {"main", "master"}:
+        raise RuntimeError(f"Direct writes to protected branch {actual_branch!r} are forbidden.")
+    if actual_branch != expected_branch:
+        raise RuntimeError(
+            f"Agent worktree branch mismatch: expected {expected_branch!r}, current branch is {actual_branch!r}."
+        )
+
+    status = porcelain_status(source)
     if status:
         raise RuntimeError(
-            "Live rebuild requires a clean BurnCloud source working tree before Agent writes. "
+            "Live rebuild requires a clean Agent worktree before Builder starts. "
             f"Current git status:\n{status}"
         )
-    return {"phase": "write_preflight_passed"}
+    if porcelain_status(base):
+        raise RuntimeError("Primary BurnCloud checkout became dirty after Agent worktree creation; refusing to proceed.")
+
+    return {"source_baseline_status": "clean", "phase": "write_preflight_passed"}
 
 
 def architecture_agent(state: UIRebuildState) -> dict[str, Any]:
@@ -219,6 +268,7 @@ def builder_agent(state: UIRebuildState) -> dict[str, Any]:
         model_name=_require_model(state),
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
+        agent_branch=state["agent_branch"],
         page=page,
         architecture_plan=state.get("architecture_plan", {}),
         permission_findings=state.get("permission_findings", []),
@@ -350,6 +400,7 @@ def fixer(state: UIRebuildState) -> dict[str, Any]:
         model_name=_require_model(state),
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
+        agent_branch=state["agent_branch"],
         page=page,
         review_findings=state.get("review_findings", []),
     )
@@ -390,6 +441,10 @@ def human_gate(state: UIRebuildState) -> dict[str, Any]:
     decision = interrupt({
         "type": "burncloud_ui_rebuild_final_gate",
         "execution_mode": state.get("execution_mode", "dry_run"),
+        "model_name": _require_model(state),
+        "base_commit": state.get("base_commit", ""),
+        "agent_branch": state.get("agent_branch", ""),
+        "worktree_root": state.get("worktree_root", ""),
         "completed_pages": len(state.get("completed_pages", [])),
         "total_pages": len(state.get("page_queue", TARGET_PAGES)),
         "changed_files": state.get("changed_files", []),
@@ -407,6 +462,8 @@ def release_agent(state: UIRebuildState) -> dict[str, Any]:
     if state.get("execution_mode", "dry_run") == "dry_run":
         return {"release_status": "dry_run_complete_no_git_write", "phase": "done"}
     return {
-        "release_status": "approved_local_changes_no_git_publish",
+        "release_status": "approved_agent_branch_no_git_publish",
+        "agent_branch": state.get("agent_branch", ""),
+        "worktree_root": state.get("worktree_root", ""),
         "phase": "done",
     }

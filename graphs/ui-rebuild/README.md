@@ -72,7 +72,30 @@ LANGSMITH_API_KEY=xxxxxxxx
 
 `model_factory.py` 统一读取这些变量。Agent 的模型名称由调用方传入，不增加第四个环境变量。
 
-### 3. 运行测试和 LangGraph
+### 3. 先验证 create_agent + Tool Calling
+
+在允许 Builder 修改 BurnCloud 之前，先验证模型端点真的支持 LangChain Agent 的 Tool Calling：
+
+```bat
+burncloud-ui-rebuild agent-check --model 你的模型名
+```
+
+成功结果：
+
+```json
+{
+  "status": "PASS",
+  "model": "你的模型名",
+  "tool_called": true,
+  "final_text": "AGENT_READY"
+}
+```
+
+这个检查不会读取或修改 `burncloud/burncloud`。它只创建一个真实 `create_agent()`，要求模型调用一个确定性的 probe tool，再验证 ToolMessage round-trip。
+
+如果模型能正常聊天、但 `agent-check` 返回 FAIL，说明当前 OpenAI-compatible 端点还不足以承担 Builder / Reviewer Agent，需要先解决 Tool Calling 兼容性。
+
+### 4. 运行测试和 LangGraph
 
 ```bat
 pytest
@@ -92,4 +115,4 @@ export BURNCLOUD_SOURCE_ROOT=/path/to/burncloud
 export BURNCLOUD_WORKBENCH_ROOT=/path/to/burncloud-workbench
 ```
 
-v0.1 先验证 Graph、权限不变量、25 页任务队列和 Human Gate。真正的代码写入、commit、push、PR 权限会在下一阶段单独接入，避免一开始就把高权限工具交给 Builder。
+v0.1 先验证 Graph、权限不变量、25 页任务队列、真实 Agent Tool Calling 和 Human Gate。真正的代码写入、commit、push、PR 权限会在下一阶段单独接入，避免一开始就把高权限工具交给 Builder。

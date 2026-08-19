@@ -10,12 +10,7 @@ from burncloud_ui_rebuild.coding_tools import (
     normalize_repo_path,
     restore_page_checkpoint,
 )
-from burncloud_ui_rebuild.engineering_nodes import (
-    apply_budget_guard,
-    budget_reason,
-    plan_guard_node,
-    scope_guard_node,
-)
+from burncloud_ui_rebuild.engineering_nodes import apply_budget_guard, budget_reason, plan_guard_node, scope_guard_node
 from burncloud_ui_rebuild.policy import DEFAULT_POLICY
 
 
@@ -41,6 +36,7 @@ def _agent_repo(tmp_path: Path) -> Path:
     (repo / "crates/client/src").mkdir(parents=True)
     (repo / "crates/server/src").mkdir(parents=True)
     (repo / "crates/client/src/app.rs").write_text("fn client() {}\n", encoding="utf-8")
+    (repo / "crates/client/src/unrelated.rs").write_text("fn unrelated() {}\n", encoding="utf-8")
     (repo / "crates/server/src/api.rs").write_text("fn server() {}\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "base")
@@ -57,14 +53,8 @@ def test_plan_guard_rejects_traversal_backend_and_unlisted_step():
     result = plan_guard_node({
         "implementation_plan": {
             "status": "COMPLETE",
-            "allowed_files": [
-                "../secret.txt",
-                "crates/server/src/api.rs",
-                "crates/client/src/app.rs",
-            ],
-            "steps": [
-                {"file": "crates/client/src/not_allowed.rs", "intent": "unexpected"},
-            ],
+            "allowed_files": ["../secret.txt", "crates/server/src/api.rs", "crates/client/src/app.rs"],
+            "steps": [{"file": "crates/client/src/not_allowed.rs", "intent": "unexpected"}],
         },
         "page_context": {},
     })
@@ -110,13 +100,42 @@ def test_builder_tool_refuses_file_outside_approved_plan(tmp_path: Path):
         "new": "fn client() { println!(\"ok\"); }",
         "expected_occurrences": 1,
     })
-    refused = tools["create_source_file"].invoke({
-        "path": "crates/client/src/extra.rs",
-        "content": "// extra\n",
-    })
+    refused = tools["create_source_file"].invoke({"path": "crates/client/src/extra.rs", "content": "// extra\n"})
     assert ok.startswith("UPDATED")
     assert "PLAN_SCOPE_REFUSED" in refused
     assert not (repo / "crates/client/src/extra.rs").exists()
+
+
+def test_restore_scope_can_discard_dirty_unplanned_file_without_edit_permission(tmp_path: Path):
+    repo = _agent_repo(tmp_path)
+    workbench = tmp_path / "workbench"
+    workbench.mkdir()
+    unrelated = repo / "crates/client/src/unrelated.rs"
+    unrelated.write_text("fn unrelated() { println!(\"dirty\"); }\n", encoding="utf-8")
+
+    tools = {
+        item.name: item
+        for item in build_coding_tools(
+            source_root=repo,
+            workbench_root=workbench,
+            allow_write=True,
+            expected_branch="agent/ui-rebuild/v1-test",
+            allowed_write_files=["crates/client/src/app.rs"],
+            allowed_restore_files=["crates/client/src/unrelated.rs"],
+        )
+    }
+
+    edit_refused = tools["replace_source_text"].invoke({
+        "path": "crates/client/src/unrelated.rs",
+        "old": "dirty",
+        "new": "edited",
+        "expected_occurrences": 1,
+    })
+    restored = tools["restore_source_file"].invoke({"path": "crates/client/src/unrelated.rs"})
+
+    assert "PLAN_SCOPE_REFUSED" in edit_refused
+    assert restored == "RESTORED crates/client/src/unrelated.rs TO HEAD"
+    assert unrelated.read_text(encoding="utf-8") == "fn unrelated() {}\n"
 
 
 def test_scope_guard_rejects_unplanned_and_non_client_diff(tmp_path: Path):

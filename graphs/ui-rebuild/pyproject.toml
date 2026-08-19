@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "burncloud-ui-rebuild"
-version = "0.4.0"
-description = "LangGraph harness for rebuilding the BurnCloud Buyer, Supplier and Admin console."
+version = "1.0.0"
+description = "BurnCloud Graph Engineering Harness v1 for Buyer, Supplier and Admin console delivery."
 requires-python = ">=3.11"
 dependencies = [
   "langgraph>=1.1,<2.0",

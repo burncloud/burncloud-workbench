@@ -137,6 +137,7 @@ def run_builder_agent(
     model_name: str,
     source_root: str,
     workbench_root: str,
+    agent_branch: str,
     page: dict[str, Any],
     architecture_plan: dict[str, Any],
     permission_findings: list[dict[str, Any]],
@@ -146,6 +147,7 @@ def run_builder_agent(
         source_root=source_root,
         workbench_root=workbench_root,
         allow_write=allow_write,
+        expected_branch=agent_branch if allow_write else None,
     )
     model = create_chat_model(model_name, timeout=180)
     agent = create_agent(
@@ -168,6 +170,7 @@ Builder-specific rules:
     prompt = {
         "task": "Implement the assigned BurnCloud UI page contract.",
         "write_enabled": allow_write,
+        "agent_branch": agent_branch,
         "page": page,
         "architecture_plan": architecture_plan,
         "permission_findings": permission_findings,
@@ -242,6 +245,7 @@ def run_fixer_agent(
     model_name: str,
     source_root: str,
     workbench_root: str,
+    agent_branch: str,
     page: dict[str, Any],
     review_findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -249,6 +253,7 @@ def run_fixer_agent(
         source_root=source_root,
         workbench_root=workbench_root,
         allow_write=True,
+        expected_branch=agent_branch,
     )
     model = create_chat_model(model_name, timeout=180)
     agent = create_agent(
@@ -268,6 +273,7 @@ Fixer-specific rules:
     )
     prompt = {
         "task": "Correct only the listed review findings.",
+        "agent_branch": agent_branch,
         "page": page,
         "review_findings": review_findings,
         "page_contract": page["contract_path"],

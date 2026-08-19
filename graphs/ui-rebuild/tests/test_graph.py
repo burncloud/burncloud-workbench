@@ -1,7 +1,13 @@
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from burncloud_ui_rebuild.graph import build_graph, default_execution_mode, initial_state
+from burncloud_ui_rebuild.graph import (
+    _after_page_rebuild,
+    build_graph,
+    default_execution_mode,
+    initial_state,
+)
+from burncloud_ui_rebuild.page_graph import _after_fix
 
 
 def test_default_execution_mode_is_write():
@@ -11,6 +17,19 @@ def test_default_execution_mode_is_write():
 
 def test_explicit_dry_run_is_preserved():
     assert default_execution_mode({"execution_mode": "dry_run"})["execution_mode"] == "dry_run"
+
+
+def test_exhausted_or_blocked_fix_routes_to_human_intervention():
+    assert _after_fix({"current_page_status": "fix_exhausted"}) == "人工介入"
+    assert _after_fix({"current_page_status": "fix_blocked"}) == "人工介入"
+    assert _after_fix({"current_page_status": "fix_applied"}) == "重新验证"
+
+
+def test_blocked_page_is_not_marked_complete():
+    assert _after_page_rebuild({"current_page_status": "fix_exhausted"}) == "人工介入"
+    assert _after_page_rebuild({"current_page_status": "fix_blocked"}) == "人工介入"
+    assert _after_page_rebuild({"current_page_status": "builder_blocked"}) == "人工介入"
+    assert _after_page_rebuild({"current_page_status": "review_passed"}) == "页面完成"
 
 
 def test_dry_run_processes_all_pages_then_waits_for_human():

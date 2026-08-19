@@ -119,6 +119,8 @@ Authority and truth rules:
 
 Engineering rules:
 - Inspect before changing.
+- Discover source paths with search_source/list_source_directory before reading a path that was not already returned by a tool or supplied as an approved known path.
+- Never invent repository paths from module names. If a read/list/search returns NOT_FOUND, treat it as recoverable: discover the real path and retry.
 - Make the smallest correct change for the assigned scope.
 - Reuse existing BurnCloud components and patterns where they satisfy the target contract.
 - Never access .git internals.

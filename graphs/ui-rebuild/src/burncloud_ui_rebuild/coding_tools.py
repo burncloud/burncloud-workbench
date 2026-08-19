@@ -135,7 +135,7 @@ def changed_source_files(source_root: str | Path) -> list[str]:
 def run_named_validation(source_root: str | Path, name: str) -> dict[str, object]:
     root = Path(source_root).resolve()
     commands: dict[str, tuple[list[str], int]] = {
-        "cargo_fmt_check": (["cargo", "fmt", "--all", "--", "--check"], 180),
+        "cargo_fmt_check": (["cargo", "fmt", "-p", "burncloud-client", "--", "--check"], 180),
         "client_check": (["cargo", "check", "-p", "burncloud-client"], 900),
         "client_test": (["cargo", "test", "-p", "burncloud-client"], 900),
     }
@@ -266,6 +266,11 @@ def build_coding_tools(
             target.write_text(content, encoding="utf-8")
             return f"CREATED {target.relative_to(source).as_posix()}"
 
-        tools.extend([replace_source_text, create_source_file])
+        @tool("format_client")
+        def format_client() -> str:
+            """Run the fixed safe formatter `cargo fmt -p burncloud-client`. No arbitrary command arguments are accepted."""
+            return str(_run(source, ["cargo", "fmt", "-p", "burncloud-client"], timeout=180))
+
+        tools.extend([replace_source_text, create_source_file, format_client])
 
     return tools

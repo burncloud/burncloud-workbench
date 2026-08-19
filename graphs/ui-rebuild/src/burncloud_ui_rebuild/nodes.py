@@ -9,6 +9,7 @@ from langgraph.types import interrupt
 
 from .agents import run_builder_agent, run_fixer_agent, run_reviewer_agent
 from .coding_tools import changed_source_files, git_status, run_named_validation
+from .config import source_root as default_source_root, workbench_root as default_workbench_root
 from .manifest import TARGET_PAGES
 from .permissions import validate_target_manifest
 from .state import Finding, UIRebuildState
@@ -42,8 +43,23 @@ def _sha256(path: Path) -> str:
 def _require_model(state: UIRebuildState) -> str:
     model_name = state.get("model_name", "").strip()
     if not model_name:
-        raise RuntimeError("write mode requires model_name; pass --model to the rebuild command or set it in Graph state.")
+        raise RuntimeError("write mode requires model_name; pass --model or set model_name in Studio state.")
     return model_name
+
+
+def bootstrap(state: UIRebuildState) -> dict[str, Any]:
+    """Populate deterministic defaults so Studio runs need only mode/model/scope inputs."""
+    return {
+        "thread_id": state.get("thread_id", "burncloud-ui-rebuild-studio"),
+        "execution_mode": state.get("execution_mode", "dry_run"),
+        "source_repo_root": state.get("source_repo_root") or str(default_source_root()),
+        "workbench_root": state.get("workbench_root") or str(default_workbench_root()),
+        "max_fix_rounds": state.get("max_fix_rounds", 3),
+        "completed_pages": list(state.get("completed_pages", [])),
+        "implementation_results": list(state.get("implementation_results", [])),
+        "warnings": list(state.get("warnings", [])),
+        "phase": "bootstrapped",
+    }
 
 
 def spec_agent(state: UIRebuildState) -> dict[str, Any]:

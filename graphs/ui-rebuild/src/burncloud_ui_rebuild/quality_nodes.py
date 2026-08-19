@@ -12,6 +12,12 @@ from .policy import DEFAULT_POLICY, blocking_findings
 from .state import Finding, UIRebuildState
 
 
+def _changed_files(state: UIRebuildState) -> list[str]:
+    if state.get("execution_mode", "dry_run") != "write":
+        return []
+    return changed_source_files(state["source_repo_root"])
+
+
 def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     """Deterministic code-level gate owned entirely by HarnessPolicy."""
     page = state.get("current_page")
@@ -54,19 +60,13 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     return {
         "verification_findings": findings,
         "validation_results": results,
-        "changed_files": changed_source_files(state["source_repo_root"]),
+        "changed_files": _changed_files(state),
         "current_page_status": "code_verified" if not blocking_findings(findings) else "verification_failed",
     }
 
 
 def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
-    """Deterministic integration anchor outside the LLM loop.
-
-    v1 executes tests plus the same LiveView/application integration compile checks
-    used by BurnCloud's production client CI. Browser automation is not invented:
-    when no browser-E2E suite exists in the source repository, that capability is
-    reported explicitly rather than treated as a silent pass.
-    """
+    """Deterministic integration anchor outside the LLM loop."""
     findings = list(state.get("verification_findings", []))
     results = list(state.get("validation_results", []))
 
@@ -92,7 +92,7 @@ def reality_anchor(state: UIRebuildState) -> dict[str, Any]:
         "verification_findings": findings,
         "validation_results": results,
         "reality_report": report,
-        "changed_files": changed_source_files(state["source_repo_root"]),
+        "changed_files": _changed_files(state),
         "current_page_status": "reality_passed" if not blocking_findings(findings) else "reality_failed",
     }
 
@@ -144,7 +144,7 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
         return {
             "fix_round": max_rounds,
             "current_page_status": "fix_exhausted",
-            "changed_files": changed_source_files(state["source_repo_root"]),
+            "changed_files": _changed_files(state),
             "warnings": warnings,
         }
 
@@ -175,7 +175,7 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
     update: dict[str, Any] = {
         "fix_round": current,
         "fixer_report": report,
-        "changed_files": changed_source_files(state["source_repo_root"]),
+        "changed_files": _changed_files(state),
         "current_page_status": status,
     }
     update.update(accumulate_usage(state, usage))
@@ -202,7 +202,7 @@ def page_checkpoint(state: UIRebuildState) -> dict[str, Any]:
         "page_checkpoint": checkpoint,
         "page_checkpoint_history": history,
         "page_context": page_context,
-        "changed_files": changed_source_files(state["source_repo_root"]),
+        "changed_files": _changed_files(state),
         "phase": "page_checkpointed",
     }
 

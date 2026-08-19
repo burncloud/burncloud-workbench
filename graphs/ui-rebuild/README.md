@@ -13,14 +13,14 @@
 - 自动生成并遍历 25 个目标页面任务，Golden Pages 优先。
 - live write 模式使用真实 `create_agent()` Builder / Reviewer / Fixer。
 - 每页执行 Builder → deterministic Verifier → independent Reviewer → bounded Fix Loop。
-- 每次 live write 自动从干净的 `burncloud/main` 创建独立 Agent branch + Git worktree；禁止直接写 main。
+- 第一次 live write 从干净的 `burncloud/main` 创建独立 Agent branch + Git worktree；后续 Run 自动复用同一施工分支/worktree。
 - 默认模型是 `gpt-5.6-sol`，Studio/CLI 都可以省略模型名；需要时仍可显式覆盖。
 - 最后使用 LangGraph `interrupt()` 等待人工批准。
 - Release Agent 当前不会自动 commit、push 或 merge。
 
 ## Git 隔离规则
 
-每次 write Run 自动创建：
+第一次 write Run 自动创建：
 
 ```text
 C:\Users\huang\Work\
@@ -36,12 +36,25 @@ C:\Users\huang\Work\
 agent/ui-rebuild/<timestamp>-<id>
 ```
 
+后续再次启动 LangGraph、重新创建 Studio Thread 或重新提交 Run 时：
+
+```text
+扫描已有 agent/ui-rebuild/* worktree
+→ 选择最新仍存在的 UI rebuild worktree
+→ 复用原 agent_branch
+→ 保留原来的未提交 Agent diff
+→ 从上次施工现场继续
+```
+
+只有当没有任何可复用的 UI rebuild worktree 时，才会创建新的 Agent branch/worktree。
+
 硬规则：
 
 - `burncloud` 主 checkout 必须位于 `main`。
-- `burncloud/main` 必须 clean，否则拒绝创建 Agent worktree。
-- Agent worktree 从 main 当前 HEAD commit 创建并记录 `base_commit`。
-- Builder/Fixer 的写工具会再次检查当前 branch 必须等于本 Run 的 `agent_branch`。
+- `burncloud/main` 必须 clean，否则拒绝开始 Agent 写入。
+- 新建 Agent worktree 时必须 clean。
+- 复用旧 Agent worktree 时允许保留上次未提交的 Agent 修改，并继续开发。
+- Builder/Fixer 的写工具会再次检查当前 branch 必须等于当前 `agent_branch`。
 - `main` / `master` 上的写操作会被工具层硬拒绝。
 - 不自动 stash、不自动 restore main、不自动删除用户已有修改。
 
@@ -103,7 +116,7 @@ C:\Users\huang\Work\
 └── burncloud-workbench\
 ```
 
-`burncloud-worktrees\` 会在第一次 live write 时自动创建。
+`burncloud-worktrees\` 会在第一次 live write 时自动创建；后续 Run 默认复用已有 UI rebuild worktree。
 
 ### 1. 创建虚拟环境并安装
 
@@ -165,35 +178,31 @@ pytest
 langgraph dev
 ```
 
-第一次 live Studio Run 现在只需要：
+默认执行模式已经是 `write`。限制到第一张 Golden Page 时只需要：
 
 ```json
 {
-  "execution_mode": "write",
   "page_limit": 1
 }
 ```
 
-`bootstrap` 会自动使用 `gpt-5.6-sol`；`prepare_worktree` 会自动创建 Agent branch/worktree。
+`bootstrap` 会自动使用 `gpt-5.6-sol`；`prepare_worktree` 会优先复用已有 UI rebuild Agent branch/worktree，没有时才创建新的。
 
 完整主流程：
 
 ```text
-bootstrap
-→ spec_agent
-→ repo_scout
-→ permission_guardian
-→ prepare_worktree
-→ write_preflight
-→ architecture_agent
-→ select_next_page
-→ Builder(create_agent + bounded worktree-only write tools)
-→ Verifier(cargo fmt/client check)
-→ Reviewer(create_agent + read-only tools)
-→ FAIL: Fixer(create_agent + bounded worktree-only write tools) → Verify → Review
-→ PASS: mark_page_complete
-→ final_permission_check
-→ Human Gate
+默认执行模式
+→ 初始化
+→ 读取规范
+→ 代码侦察
+→ 权限守卫
+→ 创建开发分支（优先复用旧 worktree）
+→ 写入预检
+→ 架构规划
+→ 选择下一页
+→ 页面重建
+→ 最终权限检查
+→ 人工审批
 ```
 
 ### 6. 第一次真实 Agent 开发（CLI）
@@ -220,6 +229,7 @@ burncloud-ui-rebuild rebuild --limit 1 --write
 ```text
 agent_branch
 worktree_root
+worktree_reused
 base_commit
 changed_files
 validation_results

@@ -5,10 +5,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from langgraph.types import interrupt
-
-from .agents import run_builder_agent, run_fixer_agent, run_reviewer_agent
-from .coding_tools import changed_source_files, run_named_validation
 from .config import DEFAULT_MODEL_NAME, source_root as default_source_root, workbench_root as default_workbench_root
 from .manifest import TARGET_PAGES
 from .permissions import validate_target_manifest
@@ -41,15 +37,11 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _require_model(state: UIRebuildState) -> str:
-    return state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
-
-
 def bootstrap(state: UIRebuildState) -> dict[str, Any]:
-    """Populate deterministic defaults so Studio runs can omit routine settings."""
+    """Populate deterministic defaults before any repository or Agent work."""
     base_repo = state.get("base_repo_root") or state.get("source_repo_root") or str(default_source_root())
     return {
-        "thread_id": state.get("thread_id", "burncloud-ui-rebuild-studio"),
+        "thread_id": state.get("thread_id", "burncloud-graph-engineering-v1"),
         "execution_mode": state.get("execution_mode", "dry_run"),
         "model_name": state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
         "base_repo_root": base_repo,
@@ -65,7 +57,7 @@ def bootstrap(state: UIRebuildState) -> dict[str, Any]:
 
 
 def spec_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 2 — Rules keeper: load target truth, never infer it from old UI."""
+    """Load approved target truth and the bounded page queue."""
     root = Path(state["workbench_root"])
     specs: dict[str, dict[str, str]] = {}
     missing: list[str] = []
@@ -88,12 +80,11 @@ def spec_agent(state: UIRebuildState) -> dict[str, Any]:
 
     if missing:
         raise FileNotFoundError(f"Missing approved UI specifications: {missing}")
-
     return {"specs": specs, "page_queue": queue, "phase": "specs_loaded"}
 
 
 def repo_scout(state: UIRebuildState) -> dict[str, Any]:
-    """Role 3 — Scout: inspect current source truth; never modify it."""
+    """Deterministically inspect high-value repository facts before page Agents run."""
     root = Path(state["source_repo_root"])
     evidence: dict[str, Any] = {}
     routes: list[str] = []
@@ -118,17 +109,15 @@ def repo_scout(state: UIRebuildState) -> dict[str, Any]:
         }
         if relative == "crates/client/src/app.rs":
             routes.extend(route_pattern.findall(text))
-
     return {"repo_evidence": evidence, "current_routes": routes, "warnings": warnings, "phase": "repo_scanned"}
 
 
 def permission_guardian(state: UIRebuildState) -> dict[str, Any]:
-    """Role 4 — Permission Guardian: deterministic gate with veto power."""
+    """Deterministic permission/namespace gate with veto power."""
     findings = validate_target_manifest(state.get("page_queue", TARGET_PAGES))
     current_routes = state.get("current_routes", [])
     current_management = [r for r in current_routes if r not in {"/", "/home", "/landing", "/login", "/register"}]
     legacy_root_routes = [r for r in current_management if not r.startswith("/console")]
-
     if legacy_root_routes:
         findings.append(Finding(
             severity="info",
@@ -145,7 +134,7 @@ def permission_guardian(state: UIRebuildState) -> dict[str, Any]:
 
 
 def prepare_worktree(state: UIRebuildState) -> dict[str, Any]:
-    """Create once, then reuse the same isolated Agent branch/worktree across runs."""
+    """Create once, then reuse the isolated Agent branch/worktree across runs."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"phase": "worktree_skipped"}
 
@@ -157,27 +146,15 @@ def prepare_worktree(state: UIRebuildState) -> dict[str, Any]:
             raise RuntimeError(f"Recorded Agent worktree no longer exists: {root}")
         actual = current_branch(root)
         if actual != existing_branch:
-            raise RuntimeError(
-                f"Recorded Agent worktree branch mismatch: expected {existing_branch!r}, found {actual!r}."
-            )
-        return {
-            "source_repo_root": str(root),
-            "worktree_reused": True,
-            "phase": "worktree_reused",
-        }
+            raise RuntimeError(f"Recorded Agent worktree branch mismatch: expected {existing_branch!r}, found {actual!r}.")
+        return {"source_repo_root": str(root), "worktree_reused": True, "phase": "worktree_reused"}
 
-    prepared = prepare_agent_worktree(
-        state["base_repo_root"],
-        base_branch=state.get("base_branch", "main"),
-    )
-    return {
-        **prepared,
-        "phase": "worktree_reused" if prepared.get("worktree_reused") else "worktree_prepared",
-    }
+    prepared = prepare_agent_worktree(state["base_repo_root"], base_branch=state.get("base_branch", "main"))
+    return {**prepared, "phase": "worktree_reused" if prepared.get("worktree_reused") else "worktree_prepared"}
 
 
 def write_preflight(state: UIRebuildState) -> dict[str, Any]:
-    """Protect main while allowing an existing Agent worktree to keep its in-progress diff."""
+    """Protect main while allowing a reused Agent worktree to retain in-progress diff."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"phase": "write_preflight_skipped"}
 
@@ -193,41 +170,28 @@ def write_preflight(state: UIRebuildState) -> dict[str, Any]:
     if actual_branch in {"main", "master"}:
         raise RuntimeError(f"Direct writes to protected branch {actual_branch!r} are forbidden.")
     if actual_branch != expected_branch:
-        raise RuntimeError(
-            f"Agent worktree branch mismatch: expected {expected_branch!r}, current branch is {actual_branch!r}."
-        )
-
+        raise RuntimeError(f"Agent worktree branch mismatch: expected {expected_branch!r}, current branch is {actual_branch!r}.")
     if porcelain_status(base):
         raise RuntimeError("Primary BurnCloud checkout is dirty; refusing Agent writes until main is clean.")
 
     status = porcelain_status(source)
     reused = bool(state.get("worktree_reused", False))
     if status and not reused:
-        raise RuntimeError(
-            "A newly-created Agent worktree must start clean before Builder writes. "
-            f"Current git status:\n{status}"
-        )
+        raise RuntimeError("A newly-created Agent worktree must start clean before Builder writes. " f"Current git status:\n{status}")
 
     warnings = list(state.get("warnings", []))
     if status and reused:
-        warnings.append(
-            "Reusing the existing UI rebuild worktree with in-progress Agent changes; this run will continue that diff."
-        )
+        warnings.append("Reusing the existing UI rebuild worktree with in-progress Agent changes; this run will continue that diff.")
         baseline_status = "continuing_existing_changes"
     elif reused:
         baseline_status = "reused_clean_worktree"
     else:
         baseline_status = "clean_new_worktree"
-
-    return {
-        "source_baseline_status": baseline_status,
-        "warnings": warnings,
-        "phase": "write_preflight_passed",
-    }
+    return {"source_baseline_status": baseline_status, "warnings": warnings, "phase": "write_preflight_passed"}
 
 
 def architecture_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 5 — Architect: define the new foundation before pages are built."""
+    """Publish stable target architecture facts for the bounded page graph."""
     return {
         "architecture_plan": {
             "management_namespace": "/console/*",
@@ -269,183 +233,6 @@ def select_next_page(state: UIRebuildState) -> dict[str, Any]:
     }
 
 
-def builder_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 6 — Builder: dry-run plans or live create_agent implementation."""
-    page = state.get("current_page")
-    if page is None:
-        return {}
-
-    if state.get("execution_mode", "dry_run") == "dry_run":
-        result = {
-            "page_id": page["id"],
-            "route": page["route"],
-            "contract_path": page["contract_path"],
-            "status": "dry_run_planned",
-            "note": "No source files were modified.",
-        }
-        return {
-            "implementation_results": [*state.get("implementation_results", []), result],
-            "current_page_status": "built",
-        }
-
-    report = run_builder_agent(
-        model_name=_require_model(state),
-        source_root=state["source_repo_root"],
-        workbench_root=state["workbench_root"],
-        agent_branch=state["agent_branch"],
-        page=page,
-        architecture_plan=state.get("architecture_plan", {}),
-        permission_findings=state.get("permission_findings", []),
-        allow_write=True,
-    )
-    result = {
-        "page_id": page["id"],
-        "route": page["route"],
-        "contract_path": page["contract_path"],
-        **report,
-    }
-    return {
-        "implementation_results": [*state.get("implementation_results", []), result],
-        "changed_files": changed_source_files(state["source_repo_root"]),
-        "current_page_status": "built" if report["status"] == "COMPLETE" else "builder_blocked",
-    }
-
-
-def verifier(state: UIRebuildState) -> dict[str, Any]:
-    """Role 7 — Verifier: deterministic executable contract checks."""
-    page = state.get("current_page")
-    findings: list[Finding] = []
-    validation_results: list[dict[str, Any]] = []
-    if page is None:
-        return {"verification_findings": findings, "validation_results": validation_results}
-
-    if not (page["route"] == "/console" or page["route"].startswith("/console/")):
-        findings.append(Finding(
-            severity="blocker",
-            code="CONSOLE_NAMESPACE",
-            message="Management page escaped /console namespace.",
-            evidence=page["route"],
-            expected="/console/*",
-        ))
-
-    root = Path(state["workbench_root"])
-    if not (root / page["contract_path"]).exists():
-        findings.append(Finding(
-            severity="blocker",
-            code="MISSING_PAGE_CONTRACT",
-            message=f'Missing page contract for {page["id"]}.',
-            expected=page["contract_path"],
-        ))
-
-    if state.get("execution_mode", "dry_run") == "write":
-        for name in ("cargo_fmt_check", "client_check"):
-            result = run_named_validation(state["source_repo_root"], name)
-            validation_results.append(result)
-            if result["returncode"] != 0:
-                findings.append(Finding(
-                    severity="blocker",
-                    code=f"VALIDATION_{name.upper()}",
-                    message=f"Validation failed: {name}",
-                    evidence=str(result["output"]),
-                    expected="returncode 0",
-                ))
-
-    return {
-        "verification_findings": findings,
-        "validation_results": validation_results,
-        "changed_files": changed_source_files(state["source_repo_root"]),
-        "current_page_status": "verified" if not findings else "verification_failed",
-    }
-
-
-def reviewer(state: UIRebuildState) -> dict[str, Any]:
-    """Role 8 — Reviewer: independent judge; never edits code."""
-    page = state.get("current_page")
-    if page is None:
-        return {"review_findings": []}
-
-    if state.get("execution_mode", "dry_run") == "dry_run":
-        findings = list(state.get("verification_findings", []))
-        if page["role"] not in {"buyer", "supplier", "admin"}:
-            findings.append(Finding(
-                severity="blocker",
-                code="UNKNOWN_WORKSPACE_ROLE",
-                message=f'Unknown page role: {page["role"]}',
-            ))
-        return {
-            "review_findings": findings,
-            "current_page_status": "review_passed" if not findings else "review_failed",
-        }
-
-    report = run_reviewer_agent(
-        model_name=_require_model(state),
-        source_root=state["source_repo_root"],
-        workbench_root=state["workbench_root"],
-        page=page,
-        architecture_plan=state.get("architecture_plan", {}),
-        verification_findings=state.get("verification_findings", []),
-        changed_files=state.get("changed_files", []),
-    )
-    findings = [Finding(**item) for item in report["findings"]]
-    if report["decision"] == "FAIL" and not findings:
-        findings.append(Finding(
-            severity="major",
-            code="REVIEW_FAIL_WITHOUT_FINDING",
-            message=report["summary"],
-        ))
-    return {
-        "review_findings": findings,
-        "review_summary": report["summary"],
-        "current_page_status": "review_passed" if report["decision"] == "PASS" and not findings else "review_failed",
-    }
-
-
-def fixer(state: UIRebuildState) -> dict[str, Any]:
-    """Role 9 — Fixer: bounded correction only; escalate instead of crashing when exhausted."""
-    current = state.get("fix_round", 0) + 1
-    max_rounds = state.get("max_fix_rounds", 3)
-    if current > max_rounds:
-        page = state.get("current_page")
-        page_id = page["id"] if page else "unknown"
-        warnings = list(state.get("warnings", []))
-        warnings.append(
-            f"Fix loop exhausted after {max_rounds} rounds for {page_id}; escalating to human review."
-        )
-        return {
-            "fix_round": max_rounds,
-            "current_page_status": "fix_exhausted",
-            "changed_files": changed_source_files(state["source_repo_root"]),
-            "warnings": warnings,
-        }
-
-    if state.get("execution_mode", "dry_run") == "dry_run":
-        return {
-            "fix_round": current,
-            "verification_findings": [],
-            "review_findings": [],
-            "current_page_status": "fix_applied_dry_run",
-        }
-
-    page = state.get("current_page")
-    if page is None:
-        return {"fix_round": current}
-    report = run_fixer_agent(
-        model_name=_require_model(state),
-        source_root=state["source_repo_root"],
-        workbench_root=state["workbench_root"],
-        agent_branch=state["agent_branch"],
-        page=page,
-        review_findings=state.get("review_findings", []),
-    )
-    return {
-        "fix_round": current,
-        "verification_findings": [],
-        "review_findings": [],
-        "changed_files": changed_source_files(state["source_repo_root"]),
-        "current_page_status": "fix_applied" if report["status"] == "COMPLETE" else "fix_blocked",
-    }
-
-
 def mark_page_complete(state: UIRebuildState) -> dict[str, Any]:
     page = state.get("current_page")
     if page is None:
@@ -456,58 +243,8 @@ def mark_page_complete(state: UIRebuildState) -> dict[str, Any]:
     return {"completed_pages": completed, "current_page": None, "current_page_status": "complete"}
 
 
-def final_permission_check(state: UIRebuildState) -> dict[str, Any]:
-    findings = validate_target_manifest(state.get("page_queue", TARGET_PAGES))
-    completed = set(state.get("completed_pages", []))
-    expected = {task["id"] for task in state.get("page_queue", TARGET_PAGES)}
-    missing = sorted(expected - completed)
-    if missing:
-        findings.append(Finding(
-            severity="blocker",
-            code="INCOMPLETE_PAGE_QUEUE",
-            message=f"Not all target pages completed: {missing}",
-        ))
-    if state.get("current_page_status") in {"fix_exhausted", "fix_blocked", "builder_blocked"}:
-        page = state.get("current_page")
-        findings.append(Finding(
-            severity="blocker",
-            code="PAGE_REBUILD_BLOCKED",
-            message=(
-                f"Page rebuild stopped with status {state.get('current_page_status')}"
-                + (f" for {page['id']}" if page else "")
-                + "."
-            ),
-            evidence=f"fix_round={state.get('fix_round', 0)}",
-            expected="Resolve remaining verifier/reviewer findings before release.",
-        ))
-    return {"final_findings": findings, "phase": "final_permission_checked"}
-
-
-def human_gate(state: UIRebuildState) -> dict[str, Any]:
-    decision = interrupt({
-        "type": "burncloud_ui_rebuild_final_gate",
-        "execution_mode": state.get("execution_mode", "dry_run"),
-        "model_name": _require_model(state),
-        "base_commit": state.get("base_commit", ""),
-        "agent_branch": state.get("agent_branch", ""),
-        "worktree_root": state.get("worktree_root", ""),
-        "worktree_reused": state.get("worktree_reused", False),
-        "current_page": state.get("current_page"),
-        "current_page_status": state.get("current_page_status", ""),
-        "fix_round": state.get("fix_round", 0),
-        "review_findings": state.get("review_findings", []),
-        "completed_pages": len(state.get("completed_pages", [])),
-        "total_pages": len(state.get("page_queue", TARGET_PAGES)),
-        "changed_files": state.get("changed_files", []),
-        "validation_results": state.get("validation_results", []),
-        "final_findings": state.get("final_findings", []),
-        "question": "Approve this UI rebuild run for release processing?",
-    })
-    return {"human_decision": bool(decision)}
-
-
 def release_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 10 — Release Agent: release only approved work with no blocking findings."""
+    """Record release eligibility; v1 still never pushes, merges or writes main."""
     if not state.get("human_decision"):
         return {"release_status": "rejected", "phase": "done"}
     blockers = [item for item in state.get("final_findings", []) if item.get("severity") == "blocker"]

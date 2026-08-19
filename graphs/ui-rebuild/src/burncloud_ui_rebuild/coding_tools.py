@@ -37,6 +37,7 @@ TEXT_SUFFIXES = {
     ".sh",
 }
 MAX_TOOL_OUTPUT = 40_000
+MAX_WRITE_FILES_PER_AGENT = 8
 
 
 class ToolSafetyError(RuntimeError):
@@ -161,6 +162,19 @@ def build_coding_tools(
 ):
     source = Path(source_root).resolve()
     workbench = Path(workbench_root).resolve()
+    written_paths: set[str] = set()
+
+    def claim_write(target: Path) -> str | None:
+        relative = target.relative_to(source).as_posix()
+        if relative in written_paths:
+            return None
+        if len(written_paths) >= MAX_WRITE_FILES_PER_AGENT:
+            return (
+                f"WRITE_BUDGET_REFUSED: this Agent is limited to {MAX_WRITE_FILES_PER_AGENT} distinct files per run. "
+                f"Already touched: {sorted(written_paths)}. Keep the current page scope small or report BLOCKED."
+            )
+        written_paths.add(relative)
+        return None
 
     @tool("read_source_file")
     def read_source_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
@@ -281,6 +295,9 @@ def build_coding_tools(
                     f"REPLACEMENT_REFUSED: expected {expected_occurrences} exact occurrence(s), found {actual}.\n"
                     "Re-read the current file, choose a smaller exact anchor, and retry."
                 )
+            refused = claim_write(target)
+            if refused:
+                return refused
             target.write_text(text.replace(old, new, expected_occurrences), encoding="utf-8")
             return f"UPDATED {target.relative_to(source).as_posix()} ({expected_occurrences} replacement(s))"
 
@@ -293,15 +310,26 @@ def build_coding_tools(
                     f"CREATE_REFUSED: {path} already exists.\n"
                     "Read the existing file and use replace_source_text if a change is required."
                 )
+            refused = claim_write(target)
+            if refused:
+                return refused
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return f"CREATED {target.relative_to(source).as_posix()}"
 
-        @tool("format_client")
-        def format_client() -> str:
-            """Run the fixed safe formatter `cargo fmt -p burncloud-client`. No arbitrary command arguments are accepted."""
-            return str(_run(source, ["cargo", "fmt", "-p", "burncloud-client"], timeout=180))
+        @tool("format_source_file")
+        def format_source_file(path: str) -> str:
+            """Format exactly one existing Rust source file with rustfmt. This tool can never format the whole crate or workspace."""
+            target = _safe_path(source, path, allow_missing=True)
+            if not target.exists():
+                return _recoverable_path_error("NOT_FOUND", path)
+            if not target.is_file() or target.suffix.lower() != ".rs":
+                return "FORMAT_REFUSED: format_source_file only accepts an existing .rs file"
+            refused = claim_write(target)
+            if refused:
+                return refused
+            return str(_run(source, ["rustfmt", "--edition", "2021", str(target)], timeout=180))
 
-        tools.extend([replace_source_text, create_source_file, format_client])
+        tools.extend([replace_source_text, create_source_file, format_source_file])
 
     return tools

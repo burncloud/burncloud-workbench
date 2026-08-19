@@ -68,6 +68,14 @@ def _safe_path(root: Path, relative: str, *, allow_missing: bool = False) -> Pat
     return candidate
 
 
+def _recoverable_path_error(kind: str, relative: str) -> str:
+    return (
+        f"{kind}: {relative}\n"
+        "This is a recoverable discovery miss. Use list_source_directory or search_source "
+        "to locate the real path, then retry."
+    )
+
+
 def _read_lines(path: Path, start_line: int, end_line: int) -> str:
     if start_line < 1 or end_line < start_line:
         raise ValueError("Require 1 <= start_line <= end_line.")
@@ -156,26 +164,32 @@ def build_coding_tools(
 
     @tool("read_source_file")
     def read_source_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
-        """Read a UTF-8 source file inside burncloud/burncloud with line numbers. Max 500 lines per call."""
-        target = _safe_path(source, path)
+        """Read a UTF-8 source file inside burncloud/burncloud with line numbers. Max 500 lines per call. Missing paths are recoverable discovery results."""
+        target = _safe_path(source, path, allow_missing=True)
+        if not target.exists():
+            return _recoverable_path_error("NOT_FOUND", path)
         if not target.is_file():
-            raise ToolSafetyError("read_source_file requires a file path.")
+            return _recoverable_path_error("NOT_A_FILE", path)
         return _read_lines(target, start_line, end_line)
 
     @tool("read_workbench_file")
     def read_workbench_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
-        """Read an approved target-truth file inside burncloud-workbench. This tool is always read-only."""
-        target = _safe_path(workbench, path)
+        """Read an approved target-truth file inside burncloud-workbench. This tool is always read-only. Missing paths are recoverable discovery results."""
+        target = _safe_path(workbench, path, allow_missing=True)
+        if not target.exists():
+            return _recoverable_path_error("NOT_FOUND", path)
         if not target.is_file():
-            raise ToolSafetyError("read_workbench_file requires a file path.")
+            return _recoverable_path_error("NOT_A_FILE", path)
         return _read_lines(target, start_line, end_line)
 
     @tool("list_source_directory")
     def list_source_directory(path: str = ".") -> str:
-        """List one directory inside the BurnCloud source repository; hidden Git internals are never exposed."""
-        target = _safe_path(source, path)
+        """List one directory inside the BurnCloud source repository; hidden Git internals are never exposed. Missing paths are recoverable discovery results."""
+        target = _safe_path(source, path, allow_missing=True)
+        if not target.exists():
+            return _recoverable_path_error("NOT_FOUND", path)
         if not target.is_dir():
-            raise ToolSafetyError("list_source_directory requires a directory path.")
+            return _recoverable_path_error("NOT_A_DIRECTORY", path)
         items: list[str] = []
         for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
             if child.name in IGNORED_DIRS or child.name == ".git":
@@ -186,12 +200,14 @@ def build_coding_tools(
 
     @tool("search_source")
     def search_source(query: str, path: str = ".", max_results: int = 80) -> str:
-        """Case-insensitive literal search across text source files. Returns path, line number, and matching line."""
+        """Case-insensitive literal search across text source files. Returns path, line number, and matching line. Missing search roots are recoverable discovery results."""
         if not query.strip():
             raise ValueError("query must not be empty")
         if max_results < 1 or max_results > 200:
             raise ValueError("max_results must be between 1 and 200")
-        start = _safe_path(source, path)
+        start = _safe_path(source, path, allow_missing=True)
+        if not start.exists():
+            return _recoverable_path_error("NOT_FOUND", path)
         search_root = start if start.is_dir() else start.parent
         needle = query.lower()
         matches: list[str] = []

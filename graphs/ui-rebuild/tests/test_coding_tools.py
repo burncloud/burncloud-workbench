@@ -28,7 +28,7 @@ def test_read_only_toolset_has_no_source_write_tools(tmp_path):
     assert "read_workbench_file" in tools
     assert "replace_source_text" not in tools
     assert "create_source_file" not in tools
-    assert "format_client" not in tools
+    assert "format_source_file" not in tools
 
 
 def test_discovery_tools_return_recoverable_not_found(tmp_path):
@@ -71,6 +71,7 @@ def test_write_tools_are_confined_to_source_root(tmp_path):
     target.write_text("old value\n", encoding="utf-8")
 
     tools = _tool_map(source, workbench, allow_write=True)
+    assert "format_source_file" in tools
     tools["replace_source_text"].invoke({
         "path": "src/app.rs",
         "old": "old value",
@@ -111,3 +112,27 @@ def test_routine_write_refusals_are_recoverable(tmp_path):
     assert "CREATE_REFUSED" in create_result
     assert "REPLACEMENT_REFUSED" in replace_result
     assert existing.read_text(encoding="utf-8") == "keep me"
+
+
+def test_agent_write_budget_limits_distinct_files(tmp_path):
+    source = tmp_path / "burncloud"
+    workbench = tmp_path / "burncloud-workbench"
+    source.mkdir()
+    workbench.mkdir()
+
+    tools = _tool_map(source, workbench, allow_write=True)
+
+    for index in range(8):
+        result = tools["create_source_file"].invoke({
+            "path": f"src/file_{index}.rs",
+            "content": f"// {index}\n",
+        })
+        assert result.startswith("CREATED")
+
+    refused = tools["create_source_file"].invoke({
+        "path": "src/file_8.rs",
+        "content": "// ninth\n",
+    })
+
+    assert "WRITE_BUDGET_REFUSED" in refused
+    assert not (source / "src" / "file_8.rs").exists()

@@ -5,10 +5,14 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 class WorktreeError(RuntimeError):
     pass
+
+
+AGENT_BRANCH_PREFIX = "agent/ui-rebuild/"
 
 
 def _git(root: Path, *args: str, timeout: int = 60) -> str:
@@ -47,9 +51,67 @@ def _run_slug() -> str:
 
 
 def _validate_branch_name(branch: str) -> str:
-    if not re.fullmatch(r"agent/ui-rebuild/[0-9]{8}-[0-9]{6}-[0-9a-f]{8}", branch):
+    if not re.fullmatch(r"agent/ui-rebuild/(?:[0-9]{8}-[0-9]{6}-[0-9a-f]{8}|current)", branch):
         raise WorktreeError(f"Refusing unexpected Agent branch name: {branch}")
     return branch
+
+
+def _listed_worktrees(base: Path) -> list[dict[str, str]]:
+    """Return Git worktree records from `git worktree list --porcelain`."""
+    output = _git(base, "worktree", "list", "--porcelain")
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            records.append(current)
+            current = {}
+
+    for line in output.splitlines():
+        if not line.strip():
+            flush()
+            continue
+        if line.startswith("worktree "):
+            current["worktree_root"] = line[len("worktree ") :].strip()
+        elif line.startswith("HEAD "):
+            current["head"] = line[len("HEAD ") :].strip()
+        elif line.startswith("branch refs/heads/"):
+            current["agent_branch"] = line[len("branch refs/heads/") :].strip()
+    flush()
+    return records
+
+
+def find_reusable_agent_worktree(base_repo_root: str | Path) -> dict[str, str] | None:
+    """Find the newest existing UI rebuild worktree so later runs continue the same work."""
+    base = Path(base_repo_root).resolve()
+    candidates: list[dict[str, str]] = []
+    for record in _listed_worktrees(base):
+        branch = record.get("agent_branch", "")
+        root_text = record.get("worktree_root", "")
+        if not branch.startswith(AGENT_BRANCH_PREFIX) or not root_text:
+            continue
+        try:
+            _validate_branch_name(branch)
+        except WorktreeError:
+            continue
+        root = Path(root_text).resolve()
+        if not root.exists():
+            continue
+        if current_branch(root) != branch:
+            continue
+        candidates.append({
+            "agent_branch": branch,
+            "worktree_root": str(root),
+            "source_repo_root": str(root),
+        })
+
+    if not candidates:
+        return None
+
+    # Timestamped branch names sort chronologically, so the newest prior run wins.
+    candidates.sort(key=lambda item: item["agent_branch"], reverse=True)
+    return candidates[0]
 
 
 def prepare_agent_worktree(
@@ -57,8 +119,8 @@ def prepare_agent_worktree(
     *,
     base_branch: str = "main",
     worktree_parent: str | Path | None = None,
-) -> dict[str, str]:
-    """Create a unique isolated branch + worktree pinned to the clean base checkout HEAD."""
+) -> dict[str, Any]:
+    """Reuse the newest UI rebuild worktree, or create one when none exists yet."""
     base = Path(base_repo_root).resolve()
     if not base.exists():
         raise WorktreeError(f"Base repository does not exist: {base}")
@@ -72,9 +134,24 @@ def prepare_agent_worktree(
     status = porcelain_status(base)
     if status:
         raise WorktreeError(
-            "Base checkout must be clean before creating an Agent worktree. "
+            "Base checkout must be clean before continuing an Agent worktree. "
             f"Current git status:\n{status}"
         )
+
+    reusable = find_reusable_agent_worktree(base)
+    if reusable is not None:
+        agent_branch = reusable["agent_branch"]
+        worktree = Path(reusable["worktree_root"]).resolve()
+        base_commit = _git(base, "merge-base", base_branch, agent_branch).strip()
+        return {
+            "base_repo_root": str(base),
+            "base_branch": base_branch,
+            "base_commit": base_commit,
+            "agent_branch": agent_branch,
+            "worktree_root": str(worktree),
+            "source_repo_root": str(worktree),
+            "worktree_reused": True,
+        }
 
     base_commit = head_commit(base)
     slug = _run_slug()
@@ -103,4 +180,5 @@ def prepare_agent_worktree(
         "agent_branch": agent_branch,
         "worktree_root": str(worktree),
         "source_repo_root": str(worktree),
+        "worktree_reused": False,
     }

@@ -46,8 +46,12 @@ class ToolSafetyError(RuntimeError):
     pass
 
 
-def _normalize_rel(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+def normalize_repo_path(path: str) -> str:
+    """Normalize separators and a single/multiple './' prefix without hiding '..'."""
+    normalized = path.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def _clip(text: str, limit: int = MAX_TOOL_OUTPUT) -> str:
@@ -159,7 +163,7 @@ def changed_source_files(source_root: str | Path) -> list[str]:
         path = line[3:].strip()
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        changed.append(_normalize_rel(path))
+        changed.append(normalize_repo_path(path))
     return changed
 
 
@@ -182,13 +186,8 @@ def run_named_validation(source_root: str | Path, name: str) -> dict[str, object
 
 
 def checkpoint_history(source_root: str | Path) -> list[dict[str, str]]:
-    """Reconstruct page checkpoint mappings from Agent-branch Git history."""
     root = Path(source_root).resolve()
-    result = _run(
-        root,
-        ["git", "log", "--format=%H%x09%s", "--grep=^agent(ui): checkpoint "],
-        timeout=30,
-    )
+    result = _run(root, ["git", "log", "--format=%H%x09%s", "--grep=^agent(ui): checkpoint "], timeout=30)
     if result["returncode"] != 0:
         raise RuntimeError(str(result["output"]))
     items: list[dict[str, str]] = []
@@ -204,10 +203,6 @@ def checkpoint_history(source_root: str | Path) -> list[dict[str, str]]:
 
 
 def create_page_checkpoint(source_root: str | Path, page_id: str) -> dict[str, object]:
-    """Commit one page after deterministic + reviewer gates pass.
-
-    This is a local Agent-branch checkpoint only. It never pushes or touches main.
-    """
     root = Path(source_root).resolve()
     branch = git_branch(root)
     if branch in {"main", "master"} or not branch.startswith("agent/ui-rebuild/"):
@@ -216,17 +211,11 @@ def create_page_checkpoint(source_root: str | Path, page_id: str) -> dict[str, o
     before = head_commit(root)
     status = git_status(root)
     if not status:
-        return {
-            "status": "no_changes",
-            "page_id": page_id,
-            "branch": branch,
-            "commit": before,
-        }
+        return {"status": "no_changes", "page_id": page_id, "branch": branch, "commit": before}
 
     add_result = _run(root, ["git", "add", "-A", "--", "."], timeout=60)
     if add_result["returncode"] != 0:
         raise RuntimeError(str(add_result["output"]))
-
     commit_result = _run(
         root,
         [
@@ -243,7 +232,6 @@ def create_page_checkpoint(source_root: str | Path, page_id: str) -> dict[str, o
     )
     if commit_result["returncode"] != 0:
         raise RuntimeError(str(commit_result["output"]))
-
     after = head_commit(root)
     return {
         "status": "committed",
@@ -255,11 +243,6 @@ def create_page_checkpoint(source_root: str | Path, page_id: str) -> dict[str, o
 
 
 def restore_page_checkpoint(source_root: str | Path, target_commit: str) -> dict[str, object]:
-    """Restore tracked Agent-worktree state to a known page checkpoint.
-
-    Only commits produced by `agent(ui): checkpoint ...` are accepted. Untracked
-    files are never deleted automatically.
-    """
     root = Path(source_root).resolve()
     branch = git_branch(root)
     if branch in {"main", "master"} or not branch.startswith("agent/ui-rebuild/"):
@@ -278,7 +261,6 @@ def restore_page_checkpoint(source_root: str | Path, target_commit: str) -> dict
     reset = _run(root, ["git", "reset", "--hard", target_commit], timeout=60)
     if reset["returncode"] != 0:
         raise RuntimeError(str(reset["output"]))
-
     return {
         "status": "restored",
         "branch": branch,
@@ -300,7 +282,7 @@ def build_coding_tools(
     workbench = Path(workbench_root).resolve()
     written_paths: set[str] = set()
     planned_files = (
-        {_normalize_rel(path) for path in allowed_write_files}
+        {normalize_repo_path(path) for path in allowed_write_files}
         if allowed_write_files is not None
         else None
     )
@@ -317,7 +299,7 @@ def build_coding_tools(
             )
 
     def claim_write(target: Path) -> str | None:
-        relative = _normalize_rel(target.relative_to(source).as_posix())
+        relative = normalize_repo_path(target.relative_to(source).as_posix())
         if planned_files is not None and relative not in planned_files:
             return (
                 f"PLAN_SCOPE_REFUSED: {relative} is not in the approved implementation plan. "
@@ -414,14 +396,7 @@ def build_coding_tools(
         """Show porcelain Git status for the Agent worktree. Read-only."""
         return git_status(source) or "CLEAN"
 
-    tools = [
-        read_source_file,
-        read_workbench_file,
-        list_source_directory,
-        search_source,
-        git_diff,
-        git_worktree_status,
-    ]
+    tools = [read_source_file, read_workbench_file, list_source_directory, search_source, git_diff, git_worktree_status]
 
     if allow_write:
         @tool("replace_source_text")
@@ -486,7 +461,7 @@ def build_coding_tools(
             """Restore one approved tracked file to current Agent-branch HEAD for scope cleanup."""
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
-            relative = _normalize_rel(target.relative_to(source).as_posix())
+            relative = normalize_repo_path(target.relative_to(source).as_posix())
             tracked = _run(source, ["git", "ls-files", "--error-unmatch", "--", relative], timeout=30)
             if tracked["returncode"] != 0:
                 return f"RESTORE_REFUSED: {relative} is not a tracked file"

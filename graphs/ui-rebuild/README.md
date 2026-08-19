@@ -1,8 +1,8 @@
-# BurnCloud UI Rebuild Graph v0.1
+# BurnCloud UI Rebuild Graph v0.2
 
 这是 BurnCloud UI 全量重建的可执行 LangGraph Harness。
 
-## v0.1 目标
+## v0.2 目标
 
 - 读取 `docs/ui/` 中已批准的 Product / IA / Page Contracts。
 - 检查当前 `burncloud/burncloud` 的 Route、Auth、Role 和 Server API 权限边界。
@@ -10,10 +10,11 @@
 - 把 Buyer、Supplier、Admin 定义为 Workspace Role。
 - 普通账号可以同时拥有 `buyer + supplier`，并在两者之间切换。
 - 系统记住 `last_workspace`，但记忆永远不能绕过当前权限。
-- 自动生成并遍历 25 个目标页面任务。
-- 每页执行 Builder → Verifier → Reviewer → Fix Loop。
+- 自动生成并遍历 25 个目标页面任务，Golden Pages 优先。
+- live write 模式使用真实 `create_agent()` Builder / Reviewer / Fixer。
+- 每页执行 Builder → deterministic Verifier → independent Reviewer → bounded Fix Loop。
 - 最后使用 LangGraph `interrupt()` 等待人工批准。
-- v0.1 默认 `dry_run`，不会修改 `burncloud/burncloud`。
+- Release Agent 当前不会自动 commit、push 或 merge。
 
 ## 路径硬规则
 
@@ -28,14 +29,45 @@ Internal control       /console/internal/*
 Inference data plane   /v1/*
 ```
 
+## Agent 权限模型
+
+```text
+Builder
+├── read source/workbench
+├── search/list
+├── exact source text replacement
+├── create new source file
+├── git diff/status (read-only)
+└── allowlisted validation
+
+Reviewer
+├── read source/workbench
+├── search/list
+├── git diff/status
+└── allowlisted validation
+
+Fixer
+├── same limited write tools as Builder
+└── only fixes structured Reviewer findings
+
+No Agent can:
+- access .git internals
+- delete source files
+- execute arbitrary shell commands
+- git commit
+- git push
+- merge
+- publish
+```
+
 ## 本地运行
 
 建议两个仓库作为同级目录：
 
 ```text
-workspace/
-├── burncloud/
-└── burncloud-workbench/
+C:\Users\huang\Work\
+├── burncloud\
+└── burncloud-workbench\
 ```
 
 ### 1. 创建虚拟环境并安装
@@ -43,7 +75,7 @@ workspace/
 Windows CMD：
 
 ```bat
-cd burncloud-workbench\graphs\ui-rebuild
+cd C:\Users\huang\Work\burncloud-workbench\graphs\ui-rebuild
 py -3.13 -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install -e ".[dev]"
@@ -72,12 +104,12 @@ LANGSMITH_API_KEY=xxxxxxxx
 
 `model_factory.py` 统一读取这些变量。Agent 的模型名称由调用方传入，不增加第四个环境变量。
 
-### 3. 先验证 create_agent + Tool Calling
+### 3. 验证 create_agent + Tool Calling
 
-在允许 Builder 修改 BurnCloud 之前，先验证模型端点真的支持 LangChain Agent 的 Tool Calling：
+在允许 Builder 修改 BurnCloud 之前，先验证模型端点真的支持 Tool Calling：
 
 ```bat
-burncloud-ui-rebuild agent-check --model 你的模型名
+burncloud-ui-rebuild agent-check --model gpt-5.6-terra
 ```
 
 成功结果：
@@ -85,34 +117,101 @@ burncloud-ui-rebuild agent-check --model 你的模型名
 ```json
 {
   "status": "PASS",
-  "model": "你的模型名",
+  "model": "gpt-5.6-terra",
   "tool_called": true,
   "final_text": "AGENT_READY"
 }
 ```
 
-这个检查不会读取或修改 `burncloud/burncloud`。它只创建一个真实 `create_agent()`，要求模型调用一个确定性的 probe tool，再验证 ToolMessage round-trip。
+这个检查不会读取或修改 `burncloud/burncloud`。
 
-如果模型能正常聊天、但 `agent-check` 返回 FAIL，说明当前 OpenAI-compatible 端点还不足以承担 Builder / Reviewer Agent，需要先解决 Tool Calling 兼容性。
-
-### 4. 运行测试和 LangGraph
+### 4. 运行单元测试
 
 ```bat
 pytest
+```
+
+### 5. 启动 LangGraph Studio
+
+```bat
 langgraph dev
 ```
 
-也可以直接运行当前 dry-run：
+Studio 的 Graph 在进入 `bootstrap` 后会自动解析同级 `burncloud` 和 `burncloud-workbench` 路径。
+
+第一次 live Studio Run 推荐输入：
+
+```json
+{
+  "execution_mode": "write",
+  "model_name": "gpt-5.6-terra",
+  "page_limit": 1
+}
+```
+
+write preflight 会先检查 `burncloud` working tree 必须是 clean；否则在任何 Agent 写文件之前停止。
+
+### 6. 第一次真实 Agent 开发（CLI）
+
+先确认源码没有未提交修改：
+
+```bat
+cd C:\Users\huang\Work\burncloud
+git status --short
+```
+
+输出必须为空。
+
+然后：
+
+```bat
+cd C:\Users\huang\Work\burncloud-workbench\graphs\ui-rebuild
+.venv\Scripts\activate.bat
+burncloud-ui-rebuild rebuild --model gpt-5.6-terra --limit 1 --write
+```
+
+`--limit 1` 对应第一张 Golden Page：`Buyer Overview`。
+
+流程：
+
+```text
+bootstrap
+→ spec_agent
+→ repo_scout
+→ permission_guardian
+→ write_preflight
+→ architecture_agent
+→ select_next_page
+→ Builder(create_agent + limited write tools)
+→ Verifier(cargo fmt/client check)
+→ Reviewer(create_agent + read-only tools)
+→ FAIL: Fixer(create_agent + bounded write tools) → Verify → Review
+→ PASS: mark_page_complete
+→ final_permission_check
+→ Human Gate
+```
+
+到 Human Gate 时，源码修改已经留在本地 working tree，但还没有 commit/push/merge。检查：
+
+```bat
+cd C:\Users\huang\Work\burncloud
+git status --short
+git diff
+```
+
+只有确认结果后才进入后续 Git Release 阶段。
+
+### 7. 保留 dry-run
+
+完整 25 页流程仍可不调用真实写 Agent：
 
 ```bat
 burncloud-ui-rebuild dry-run
 ```
 
-也可以通过环境变量指定仓库位置：
+也可以通过环境变量覆盖仓库位置：
 
 ```bash
 export BURNCLOUD_SOURCE_ROOT=/path/to/burncloud
 export BURNCLOUD_WORKBENCH_ROOT=/path/to/burncloud-workbench
 ```
-
-v0.1 先验证 Graph、权限不变量、25 页任务队列、真实 Agent Tool Calling 和 Human Gate。真正的代码写入、commit、push、PR 权限会在下一阶段单独接入，避免一开始就把高权限工具交给 Builder。

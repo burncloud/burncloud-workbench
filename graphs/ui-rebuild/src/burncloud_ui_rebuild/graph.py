@@ -4,10 +4,10 @@ from langgraph.graph import END, START, StateGraph
 
 from burncloud_ui_rebuild.config import DEFAULT_EXECUTION_MODE, DEFAULT_MODEL_NAME, source_root, workbench_root
 from burncloud_ui_rebuild.engineering_nodes import initialize_run_context, recovery_node
+from burncloud_ui_rebuild.final_checks import final_quality_check
 from burncloud_ui_rebuild.nodes import (
     architecture_agent,
     bootstrap,
-    final_permission_check,
     mark_page_complete,
     permission_guardian,
     prepare_worktree,
@@ -37,7 +37,7 @@ NODE_SELECT_PAGE = "选择下一页"
 NODE_PAGE_REBUILD = "页面工程"
 NODE_PAGE_CHECKPOINT = "页面检查点"
 NODE_MARK_COMPLETE = "标记页面完成"
-NODE_FINAL_PERMISSION = "最终权限检查"
+NODE_FINAL_PERMISSION = "最终质量检查"
 NODE_HUMAN_GATE = "人工审批"
 NODE_RELEASE = "发布"
 
@@ -89,7 +89,7 @@ def build_graph(checkpointer=None):
     builder.add_node(NODE_PAGE_REBUILD, page_rebuild)
     builder.add_node(NODE_PAGE_CHECKPOINT, page_checkpoint)
     builder.add_node(NODE_MARK_COMPLETE, mark_page_complete)
-    builder.add_node(NODE_FINAL_PERMISSION, final_permission_check)
+    builder.add_node(NODE_FINAL_PERMISSION, final_quality_check)
     builder.add_node(NODE_HUMAN_GATE, human_review_gate)
     builder.add_node(NODE_RELEASE, release_agent)
 

@@ -7,8 +7,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from burncloud_ui_rebuild.agents import run_agent_check
-from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME
+from burncloud_ui_rebuild.coding_tools import checkpoint_history, restore_page_checkpoint
+from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root
 from burncloud_ui_rebuild.graph import build_graph, initial_state
+from burncloud_ui_rebuild.worktree import find_reusable_agent_worktree
 
 
 def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> None:
@@ -19,6 +21,8 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "agent_branch": result.get("agent_branch", ""),
             "worktree_root": result.get("worktree_root", ""),
             "completed_pages": len(result.get("completed_pages", [])),
+            "current_page_status": result.get("current_page_status", ""),
+            "budget_usage": result.get("budget_usage", {}),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
             "interrupt": str(result["__interrupt__"]),
@@ -33,56 +37,45 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "agent_branch": result.get("agent_branch", ""),
             "worktree_root": result.get("worktree_root", ""),
             "completed_pages": len(result.get("completed_pages", [])),
+            "current_page_status": result.get("current_page_status", ""),
+            "budget_usage": result.get("budget_usage", {}),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
             "warnings": result.get("warnings", []),
         }, ensure_ascii=False, indent=2))
 
 
+def _current_agent_worktree() -> str:
+    reusable = find_reusable_agent_worktree(source_root())
+    if reusable is None:
+        raise SystemExit("No reusable agent/ui-rebuild worktree exists yet.")
+    return reusable["worktree_root"]
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BurnCloud UI Rebuild LangGraph")
+    parser = argparse.ArgumentParser(description="BurnCloud Graph Engineering Harness v1")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    dry = sub.add_parser("dry-run", help="Run all 25 target page tasks without modifying burncloud/burncloud.")
-    dry.add_argument("--thread-id", default="burncloud-ui-rebuild-v0.3")
+    dry = sub.add_parser("dry-run", help="Run target page tasks without modifying burncloud/burncloud.")
+    dry.add_argument("--thread-id", default="burncloud-graph-engineering-v1-dry")
+    dry.add_argument("--limit", type=int, default=1)
     dry.add_argument("--approve", action="store_true", help="Automatically approve the final human gate.")
 
-    check = sub.add_parser(
-        "agent-check",
-        help="Verify create_agent model access and tool calling without modifying source files.",
-    )
-    check.add_argument(
-        "--model",
-        default=DEFAULT_MODEL_NAME,
-        help=f"Model exposed by BASE_URL. Defaults to {DEFAULT_MODEL_NAME}.",
-    )
+    check = sub.add_parser("agent-check", help="Verify model access and tool calling without source writes.")
+    check.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
 
-    rebuild = sub.add_parser(
-        "rebuild",
-        help="Create an isolated Agent branch/worktree and run real Builder/Verifier/Reviewer/Fixer Agents there.",
-    )
-    rebuild.add_argument(
-        "--model",
-        default=DEFAULT_MODEL_NAME,
-        help=f"Model exposed by BASE_URL. Defaults to {DEFAULT_MODEL_NAME}.",
-    )
-    rebuild.add_argument(
-        "--limit",
-        type=int,
-        default=1,
-        help="Maximum number of target pages for this run. Defaults to 1 for safe first execution.",
-    )
-    rebuild.add_argument("--thread-id", default="burncloud-ui-rebuild-live-v0.3")
-    rebuild.add_argument(
-        "--write",
-        action="store_true",
-        help="Required acknowledgement that Agents may modify a newly-created isolated BurnCloud worktree.",
-    )
-    rebuild.add_argument(
-        "--approve",
-        action="store_true",
-        help="Resume the final Human Gate. This still does not commit, push, merge, or modify main.",
-    )
+    rebuild = sub.add_parser("rebuild", help="Run the real v1 Scout→Plan→Build→Verify→Review graph.")
+    rebuild.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
+    rebuild.add_argument("--limit", type=int, default=1, help="Maximum pages for this bounded run.")
+    rebuild.add_argument("--thread-id", default="burncloud-graph-engineering-v1-live")
+    rebuild.add_argument("--write", action="store_true", help="Acknowledge writes to the isolated Agent worktree.")
+    rebuild.add_argument("--approve", action="store_true", help="Resume the final Human Gate.")
+
+    checkpoints = sub.add_parser("checkpoints", help="List local page checkpoint commits on the reusable Agent worktree.")
+
+    recover = sub.add_parser("recover", help="Restore the reusable Agent worktree to a known page checkpoint.")
+    recover.add_argument("--commit", required=True, help="Exact checkpoint commit shown by the checkpoints command.")
+    recover.add_argument("--confirm", action="store_true", help="Required destructive confirmation for tracked Agent-worktree changes.")
 
     args = parser.parse_args()
 
@@ -93,11 +86,27 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.command == "checkpoints":
+        root = _current_agent_worktree()
+        print(json.dumps({"worktree_root": root, "checkpoints": checkpoint_history(root)}, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "recover":
+        if not args.confirm:
+            parser.error("recover requires --confirm because it resets tracked Agent-worktree changes")
+        root = _current_agent_worktree()
+        result = restore_page_checkpoint(root, args.commit)
+        print(json.dumps({"worktree_root": root, "recovery": result}, ensure_ascii=False, indent=2))
+        return
+
+    if args.limit < 1 or args.limit > 25:
+        parser.error("--limit must be between 1 and 25")
+
     if args.command == "dry-run":
         graph = build_graph(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": args.thread_id}}
         result = graph.invoke(
-            initial_state(execution_mode="dry_run", thread_id=args.thread_id),
+            initial_state(execution_mode="dry_run", thread_id=args.thread_id, page_limit=args.limit),
             config=config,
         )
         _print_run_result(result, approve=args.approve, graph=graph, config=config)
@@ -105,10 +114,7 @@ def main() -> None:
 
     if args.command == "rebuild":
         if not args.write:
-            parser.error("rebuild requires --write because live Builder/Fixer Agents can modify the isolated Agent worktree")
-        if args.limit < 1 or args.limit > 25:
-            parser.error("--limit must be between 1 and 25")
-
+            parser.error("rebuild requires --write because Builder/Fixer may modify the isolated Agent worktree")
         graph = build_graph(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": args.thread_id}}
         result = graph.invoke(

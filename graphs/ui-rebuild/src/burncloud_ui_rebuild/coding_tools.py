@@ -7,6 +7,8 @@ from typing import Iterable
 
 from langchain.tools import tool
 
+from .policy import DEFAULT_POLICY
+
 
 IGNORED_DIRS = {
     ".git",
@@ -36,8 +38,8 @@ TEXT_SUFFIXES = {
     ".py",
     ".sh",
 }
-MAX_TOOL_OUTPUT = 40_000
-MAX_WRITE_FILES_PER_AGENT = 8
+MAX_TOOL_OUTPUT = DEFAULT_POLICY.max_tool_output_chars
+MAX_WRITE_FILES_PER_AGENT = DEFAULT_POLICY.max_write_files_per_agent
 
 
 class ToolSafetyError(RuntimeError):
@@ -80,8 +82,8 @@ def _recoverable_path_error(kind: str, relative: str) -> str:
 def _read_lines(path: Path, start_line: int, end_line: int) -> str:
     if start_line < 1 or end_line < start_line:
         raise ValueError("Require 1 <= start_line <= end_line.")
-    if end_line - start_line + 1 > 500:
-        raise ValueError("A single read is limited to 500 lines.")
+    if end_line - start_line + 1 > DEFAULT_POLICY.max_read_lines:
+        raise ValueError(f"A single read is limited to {DEFAULT_POLICY.max_read_lines} lines.")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     selected = lines[start_line - 1 : end_line]
     return _clip("\n".join(f"{idx}: {line}" for idx, line in enumerate(selected, start=start_line)))
@@ -136,6 +138,14 @@ def git_branch(source_root: str | Path) -> str:
     return str(result["output"]).strip()
 
 
+def head_commit(source_root: str | Path) -> str:
+    root = Path(source_root).resolve()
+    result = _run(root, ["git", "rev-parse", "HEAD"], timeout=30)
+    if result["returncode"] != 0:
+        raise RuntimeError(str(result["output"]))
+    return str(result["output"]).strip()
+
+
 def changed_source_files(source_root: str | Path) -> list[str]:
     status = git_status(source_root)
     changed: list[str] = []
@@ -160,6 +170,57 @@ def run_named_validation(source_root: str | Path, name: str) -> dict[str, object
         raise ToolSafetyError(f"Validation command is not allowlisted: {name}")
     argv, timeout = commands[name]
     return _run(root, argv, timeout=timeout)
+
+
+def create_page_checkpoint(source_root: str | Path, page_id: str) -> dict[str, object]:
+    """Commit a page that already passed deterministic + reviewer gates.
+
+    This is a local Agent-branch checkpoint only. It never pushes or touches main.
+    """
+    root = Path(source_root).resolve()
+    branch = git_branch(root)
+    if branch in {"main", "master"} or not branch.startswith("agent/ui-rebuild/"):
+        raise ToolSafetyError(f"Refusing checkpoint on non-Agent branch: {branch!r}")
+
+    before = head_commit(root)
+    status = git_status(root)
+    if not status:
+        return {
+            "status": "no_changes",
+            "page_id": page_id,
+            "branch": branch,
+            "commit": before,
+        }
+
+    add_result = _run(root, ["git", "add", "-A", "--", "."], timeout=60)
+    if add_result["returncode"] != 0:
+        raise RuntimeError(str(add_result["output"]))
+
+    commit_result = _run(
+        root,
+        [
+            "git",
+            "-c",
+            "user.name=BurnCloud UI Rebuild",
+            "-c",
+            "user.email=agent@burncloud.local",
+            "commit",
+            "-m",
+            f"agent(ui): checkpoint {page_id}",
+        ],
+        timeout=120,
+    )
+    if commit_result["returncode"] != 0:
+        raise RuntimeError(str(commit_result["output"]))
+
+    after = head_commit(root)
+    return {
+        "status": "committed",
+        "page_id": page_id,
+        "branch": branch,
+        "previous_commit": before,
+        "commit": after,
+    }
 
 
 def build_coding_tools(
@@ -198,7 +259,7 @@ def build_coding_tools(
 
     @tool("read_source_file")
     def read_source_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
-        """Read a UTF-8 source file inside the Agent BurnCloud worktree with line numbers. Max 500 lines per call. Missing paths are recoverable discovery results."""
+        """Read a UTF-8 source file inside the Agent BurnCloud worktree with line numbers. Missing paths are recoverable discovery results."""
         target = _safe_path(source, path, allow_missing=True)
         if not target.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -211,7 +272,7 @@ def build_coding_tools(
 
     @tool("read_workbench_file")
     def read_workbench_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
-        """Read an approved target-truth file inside burncloud-workbench. This tool is always read-only. Missing paths are recoverable discovery results."""
+        """Read an approved target-truth file inside burncloud-workbench. This tool is always read-only."""
         target = _safe_path(workbench, path, allow_missing=True)
         if not target.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -224,7 +285,7 @@ def build_coding_tools(
 
     @tool("list_source_directory")
     def list_source_directory(path: str = ".") -> str:
-        """List one directory inside the Agent BurnCloud worktree; hidden Git internals are never exposed. Missing paths are recoverable discovery results."""
+        """List one directory inside the Agent BurnCloud worktree; hidden Git internals are never exposed."""
         target = _safe_path(source, path, allow_missing=True)
         if not target.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -240,7 +301,7 @@ def build_coding_tools(
 
     @tool("search_source")
     def search_source(query: str, path: str = ".", max_results: int = 80) -> str:
-        """Case-insensitive literal search across text source files. Returns path, line number, and matching line. Missing search roots are recoverable discovery results."""
+        """Case-insensitive literal search across text source files."""
         if not query.strip():
             return "INVALID_ARGUMENT: query must not be empty"
         if max_results < 1 or max_results > 200:
@@ -266,7 +327,7 @@ def build_coding_tools(
 
     @tool("git_diff")
     def git_diff() -> str:
-        """Show the current uncommitted Agent-worktree diff. Never stages, commits, pushes, or modifies Git."""
+        """Show the current uncommitted Agent-worktree diff without changing Git."""
         result = _run(source, ["git", "diff", "--no-ext-diff", "--unified=3", "--", "."], timeout=30)
         if result["returncode"] != 0:
             raise RuntimeError(str(result["output"]))
@@ -277,14 +338,6 @@ def build_coding_tools(
         """Show porcelain Git status for the Agent BurnCloud worktree without changing Git state."""
         return git_status(source) or "CLEAN"
 
-    @tool("run_validation")
-    def run_validation(name: str) -> str:
-        """Run one allowlisted validation: cargo_fmt_check, client_check, or client_test. Arbitrary shell commands are forbidden."""
-        try:
-            return str(run_named_validation(source, name))
-        except ToolSafetyError as exc:
-            return f"VALIDATION_REFUSED: {exc}"
-
     tools = [
         read_source_file,
         read_workbench_file,
@@ -292,13 +345,12 @@ def build_coding_tools(
         search_source,
         git_diff,
         git_worktree_status,
-        run_validation,
     ]
 
     if allow_write:
         @tool("replace_source_text")
         def replace_source_text(path: str, old: str, new: str, expected_occurrences: int = 1) -> str:
-            """Safely edit an existing Agent-worktree source file by exact text replacement. Routine mismatches are recoverable; branch/security violations fail hard."""
+            """Safely edit an existing Agent-worktree source file by exact text replacement."""
             assert_write_branch()
             if not old:
                 return "INVALID_ARGUMENT: old must not be empty"
@@ -324,7 +376,7 @@ def build_coding_tools(
 
         @tool("create_source_file")
         def create_source_file(path: str, content: str) -> str:
-            """Create a new UTF-8 file inside the Agent worktree. Existing paths are recoverable refusals; branch/security violations fail hard."""
+            """Create a new UTF-8 file inside the Agent worktree."""
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             if target.exists():
@@ -341,7 +393,7 @@ def build_coding_tools(
 
         @tool("format_source_file")
         def format_source_file(path: str) -> str:
-            """Format exactly one existing Rust source file in the Agent worktree with rustfmt. Never formats the whole crate/workspace."""
+            """Format exactly one existing Rust source file in the Agent worktree with rustfmt."""
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             if not target.exists():
@@ -353,6 +405,23 @@ def build_coding_tools(
                 return refused
             return str(_run(source, ["rustfmt", "--edition", "2021", str(target)], timeout=180))
 
-        tools.extend([replace_source_text, create_source_file, format_source_file])
+        @tool("restore_source_file")
+        def restore_source_file(path: str) -> str:
+            """Restore one tracked file to current Agent-branch HEAD. Use only for explicit scope/regression cleanup."""
+            assert_write_branch()
+            target = _safe_path(source, path, allow_missing=True)
+            relative = target.relative_to(source).as_posix()
+            tracked = _run(source, ["git", "ls-files", "--error-unmatch", "--", relative], timeout=30)
+            if tracked["returncode"] != 0:
+                return f"RESTORE_REFUSED: {relative} is not a tracked file"
+            refused = claim_write(target)
+            if refused:
+                return refused
+            result = _run(source, ["git", "restore", "--", relative], timeout=30)
+            if result["returncode"] != 0:
+                return f"RESTORE_REFUSED: {result['output']}"
+            return f"RESTORED {relative} TO HEAD"
+
+        tools.extend([replace_source_text, create_source_file, format_source_file, restore_source_file])
 
     return tools

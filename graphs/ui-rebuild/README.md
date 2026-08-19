@@ -1,144 +1,317 @@
-# BurnCloud UI Rebuild Graph v0.4
+# BurnCloud Graph Engineering Harness v1
 
-这是 BurnCloud UI 全量重建的可执行 LangGraph Harness。
+这是 BurnCloud Buyer / Supplier / Admin Console 的可执行 LangGraph 软件交付 Harness。
 
-## v0.4 Graph Engineering 目标
+它的核心不是“多放几个 Agent”，而是把 AI 的判断力放进受控节点，把可靠性、权限、预算、验证、Git 生命周期放进确定性代码和边。
 
-- 读取 `docs/ui/` 中已批准的 Product / IA / Page Contracts。
-- 检查当前 `burncloud/burncloud` 的 Route、Auth、Role 和 Server API 权限边界。
-- 硬性保证所有管理 UI 都位于 `/console/*`。
-- Buyer、Supplier、Admin 是 Workspace Role；普通账号可同时拥有 `buyer + supplier`。
-- 默认模型 `gpt-5.6-sol`，默认 `write`，默认一次只处理 1 个页面。
-- 第一次 live write 创建独立 Agent branch + Git worktree；后续 Run 复用同一施工分支/worktree。
-- Builder / Reviewer / Fixer 是独立 `create_agent()`；确定性代码掌握路由、验证、权限和 Git 生命周期。
-- `HarnessPolicy` 统一治理调用预算、Fix Loop、写文件上限、验证标准和 Reviewer 阻塞等级。
-- Builder / Reviewer / Fixer 分别限制模型调用和 Tool 调用，避免节点内部 Loop 无限增长。
-- 页面质量链拆成：构建 → 代码验证 → 现实验证 → 独立审查 → 有界修复。
-- `cargo fmt` + `cargo check` 是代码事实；`cargo test -p burncloud-client` 是独立 Reality Anchor。
-- Reviewer 只有 `major/blocker` 才触发 Fixer；`minor/info` 允许带警告通过。
-- 页面全部质量门通过后，Harness 在 Agent branch 创建本地 Git checkpoint；不 push、不 merge main。
-- 最后通过 LangGraph `interrupt()` 等待人工批准。
+## v1 核心原则
 
-## v0.4 核心拓扑
+```text
+Prompt/Context 负责告诉 Agent 应该理解什么
+Agent           负责局部判断
+Graph           负责谁先做、失败去哪里
+Policy          负责哪些事情绝对不能越界
+Reality Anchor  负责现实事实
+Git Checkpoint  负责外部副作用恢复
+Human Gate      负责最终高风险批准
+```
+
+固定产品边界：
+
+```text
+Public UI              /, /home, /login, /register
+Management UI          /console/*
+Buyer workspace        /console/buyer/*
+Supplier workspace     /console/supplier/*
+Admin workspace        /console/admin/*
+Management API         /console/api/*
+Internal control       /console/internal/*
+Inference data plane   /v1/*
+```
+
+Buyer / Supplier / Admin 是独立 Workspace Role；普通账号可以同时拥有 `buyer + supplier`。
+
+## v1 主图
 
 ```text
 默认执行模式
 → 初始化
 → 读取规范
-→ 代码侦察
+→ 仓库侦察
 → 权限守卫
-→ 创建开发分支（优先复用旧 worktree）
+→ 创建开发分支 / 复用 worktree
 → 写入预检
+→ 运行上下文
+→ 恢复检查
 → 架构规划
 → 选择下一页
-→ 页面重建
-    ├─ 构建（LLM Agent）
-    ├─ 代码验证（Python: fmt + check）
-    ├─ 现实验证（Python: client_test）
-    ├─ 审查（独立 LLM Agent）
-    ├─ 保存失败上下文
-    ├─ 修复（LLM Agent）
-    └─ 整理修复结果
-→ 页面检查点（本地 Git commit，仅 Agent branch）
+→ 页面工程
+→ 页面检查点
 → 标记页面完成
-→ 最终权限检查
+→ 最终质量检查
 → 人工审批
 → 发布状态
 ```
 
+## 页面工程子图
+
+原来的“大 Builder Loop”已经展开为真正的 Graph：
+
+```text
+页面上下文                     Python
+    ↓
+代码侦察                       Scout Agent / read-only
+    ↓
+修改计划                       Planner Agent / read-only
+    ↓
+计划守卫                       Python
+    ├─ 越界 → 重新规划（最多 2 轮）
+    └─ 通过
+         ↓
+实施修改                       Builder Agent / bounded write
+    ↓
+范围守卫                       Python
+    ├─ 计划外文件 → Fixer
+    └─ 通过
+         ↓
+代码验证                       Python
+    ├─ cargo fmt --check
+    └─ cargo check -p burncloud-client
+         ↓
+现实验证                       Python
+    ├─ cargo test -p burncloud-client
+    ├─ LiveView client compile check
+    └─ BurnCloud application integration compile check
+         ↓
+独立审查                       Reviewer Agent / read-only
+    ├─ minor/info → 带警告通过
+    └─ major/blocker → Fixer
+                         ↓
+                       修复 Agent
+                         ↓
+                       范围守卫
+```
+
+真正调用 LLM 的核心岗位只有：
+
+```text
+Scout
+Planner
+Builder
+Reviewer
+Fixer
+```
+
+其余节点均由确定性 Python 控制。
+
 ## HarnessPolicy
 
-默认策略集中在 `src/burncloud_ui_rebuild/policy.py`：
+所有治理规则集中在 `src/burncloud_ui_rebuild/policy.py`。
+
+默认：
 
 ```text
-page_limit                1
-fix_rounds                3
-write files / Agent       8
-Builder model calls       18
-Builder tool calls        40
-Reviewer model calls      10
-Reviewer tool calls       24
-Fixer model calls         12
-Fixer tool calls          28
-blocking review levels    blocker, major
-code validations          cargo_fmt_check, client_check
-reality validations       client_test
+page_limit                         1
+plan rounds                       2
+fix rounds                        3
+write files / Agent               8
+plan files                         8
+page wall-clock budget            2400s
+run wall-clock budget             7200s
+page token budget                 350000
+run token budget                  1000000
+Agent invocations / page          12
+
+Scout       model/tool calls      8 / 20
+Planner     model/tool calls      8 / 20
+Builder     model/tool calls      18 / 40
+Reviewer    model/tool calls      10 / 24
+Fixer       model/tool calls      12 / 28
+
+blocking review levels            blocker, major
+advisory review levels            minor, info
+page writable domain              crates/client/*
 ```
 
-模型可以在这些边界内自主推理，但不能修改这些边界。
+如果上游兼容接口没有返回 token usage metadata，Harness 不会伪造 Token/Cost；Invocation 数和局部 model/tool call 预算仍然有效。
 
-## Git 隔离与恢复
+## Plan 是真正权限，不是建议
 
-第一次 write Run 自动创建：
+Planner 必须提前输出：
 
 ```text
-C:\Users\huang\Work\
-├── burncloud\                         # main，只做基线，不写
-├── burncloud-workbench\
-└── burncloud-worktrees\
-    └── ui-rebuild-<timestamp>-<id>\  # Agent 实际施工目录
+allowed_files
+steps
+backend_gaps
+risks
 ```
 
-对应分支：
+Builder/Fixer 的 Tool 层会检查 `allowed_files`：
 
 ```text
-agent/ui-rebuild/<timestamp>-<id>
+计划内文件       → 可以修改
+计划外文件       → PLAN_SCOPE_REFUSED
+../ / .git       → 硬拒绝
+非 crates/client → Plan Guard 拒绝，作为 BackendGap/独立任务升级
 ```
 
-后续 Run：
+所以 Agent 不能在执行中自己扩大 scope。
+
+## Reality Anchor
+
+v1 把验证从 Agent 私有 Loop 中移出，统一交给 Graph：
+
+### Code facts
 
 ```text
-扫描已有 agent/ui-rebuild/* worktree
-→ 选择最新仍存在的 UI rebuild worktree
-→ 复用原 agent_branch
-→ 从上次施工现场继续
+cargo fmt -p burncloud-client -- --check
+cargo check -p burncloud-client
 ```
 
-页面通过所有质量门后：
+### Integration reality
 
 ```text
-页面 PASS
-→ git add -A（Harness deterministic node）
-→ local commit: agent(ui): checkpoint <page-id>
-→ 记录 checkpoint SHA
-→ 下一页从干净工作区开始
+cargo test -p burncloud-client
+cargo check -p burncloud-client --no-default-features --features liveview
+cargo check -p burncloud
 ```
 
-注意：LLM Agent 本身仍然没有 `git commit/push/merge` Tool；checkpoint 是 Harness 的确定性生命周期动作。
-
-硬规则：
-
-- `burncloud` 主 checkout 必须位于 `main` 且保持 clean。
-- Builder/Fixer 写工具会检查当前 branch 必须等于 `agent_branch`。
-- `main` / `master` 上写操作硬拒绝。
-- 不自动 stash、不自动修改 main、不自动 push、不自动 merge。
-
-## Agent 工具边界
-
-Builder / Fixer 可用：
+BurnCloud 当前仓库没有可直接被 Harness 调用的浏览器 E2E 套件，因此 Human Gate 会明确显示：
 
 ```text
-read_source_file
-read_workbench_file
-list_source_directory
-search_source
-git_diff
-git_worktree_status
-replace_source_text
-create_source_file
-format_source_file
-restore_source_file
+browser_e2e = capability_missing_not_silently_passed
 ```
 
-Reviewer 只有只读子集。
+不会把“没有 Browser E2E”伪装成 PASS。后续仓库增加 Playwright/WebDriver 等确定性套件后，只需要把它加入 Reality Anchor 白名单。
 
-确定性验证不再作为 Agent Tool 暴露；验证由 Graph 节点执行，减少 Tool Overload 和自我验证偏差。
+## State 分层
 
-`restore_source_file` 只能把一个 tracked 文件恢复到当前 Agent branch HEAD，用于 Reviewer 明确指出的 scope/regression 清理；不能访问 `.git`、不能切分支、不能 push。
+LangGraph 顶层仍保持兼容的 `UIRebuildState`，但 v1 已明确分出：
 
-## 本地运行
+```text
+RunContext
+├ run_id
+├ branch / worktree
+├ base commit
+├ model
+└ page limit
 
-### 1. 更新环境
+PageContext
+├ page id / role / route / contract
+├ baseline commit / dirty files
+├ Scout report
+├ Implementation Plan
+├ allowed files
+└ page checkpoint
+
+BudgetUsage
+├ Agent invocation count
+├ model/tool calls
+├ input/output/total tokens
+├ page budget counters
+└ run budget counters
+```
+
+Agent 节点只接收完成自身职责所需的最小 Context，不把整个历史聊天塞进每一个模型调用。
+
+## Git 隔离
+
+主 checkout：
+
+```text
+C:\Users\huang\Work\burncloud
+└ main    # 只做稳定基线，必须 clean
+```
+
+Agent 施工：
+
+```text
+C:\Users\huang\Work\burncloud-worktrees\ui-rebuild-...
+└ agent/ui-rebuild/...
+```
+
+第一次 write Run 创建 Agent branch + worktree；后续 Run 自动复用最新可用 UI rebuild worktree。
+
+Builder/Fixer Tool 会再次验证：
+
+```text
+current branch == expected agent_branch
+```
+
+`main/master` 写操作硬拒绝。
+
+## 页面 Git Checkpoint
+
+页面只有在：
+
+```text
+Scope PASS
++ Code PASS
++ Reality PASS
++ Reviewer PASS/PASS_WITH_WARNINGS
+```
+
+以后才会由确定性 Harness 创建：
+
+```text
+agent(ui): checkpoint <page-id>
+```
+
+LLM Agent 本身没有 commit / push / merge 权限。
+
+## Recovery
+
+查看当前 Agent 分支已有页面锚点：
+
+```bat
+burncloud-ui-rebuild checkpoints
+```
+
+恢复到一个已知 checkpoint：
+
+```bat
+burncloud-ui-rebuild recover --commit <SHA> --confirm
+```
+
+Recovery 规则：
+
+- 只允许 `agent/ui-rebuild/*`。
+- 目标必须是 Harness 产生的 `agent(ui): checkpoint ...` commit。
+- 目标必须是当前 HEAD 的 ancestor。
+- 使用 `git reset --hard <checkpoint>` 恢复 tracked 文件。
+- 不自动删除 untracked 文件。
+- main 永远不参与恢复。
+
+Studio State 也支持：
+
+```json
+{
+  "recovery_request": {
+    "target_commit": "<checkpoint SHA>",
+    "confirmed": true
+  }
+}
+```
+
+## Secrets
+
+`.env` 只使用三个参数：
+
+```env
+API_KEY=xxxxxxxx
+BASE_URL=http://127.0.0.1:8080/v1
+LANGSMITH_API_KEY=xxxxxxxx
+```
+
+真实 Key 不得进入 Python、Markdown、YAML、测试、Prompt、日志或 Git commit。
+
+默认模型不是 secret：
+
+```text
+gpt-5.6-sol
+```
+
+## 本地更新
 
 ```bat
 cd C:\Users\huang\Work\burncloud-workbench
@@ -150,35 +323,13 @@ python -m pip install -e ".[dev]"
 pytest
 ```
 
-### 2. `.env`
-
-真实密钥只放本机 `.env`：
-
-```env
-API_KEY=xxxxxxxx
-BASE_URL=http://127.0.0.1:8080/v1
-LANGSMITH_API_KEY=xxxxxxxx
-```
-
-### 3. Agent 连通性
-
-```bat
-burncloud-ui-rebuild agent-check
-```
-
-默认模型：
-
-```text
-gpt-5.6-sol
-```
-
-### 4. Studio
+## LangGraph Studio
 
 ```bat
 langgraph dev
 ```
 
-Studio Input 默认直接：
+默认 Input：
 
 ```json
 {}
@@ -189,38 +340,50 @@ Studio Input 默认直接：
 ```json
 {
   "execution_mode": "write",
-  "page_limit": 1,
-  "model_name": "gpt-5.6-sol"
+  "model_name": "gpt-5.6-sol",
+  "page_limit": 1
 }
 ```
 
-### 5. CLI
+## CLI
+
+真实一页：
 
 ```bat
-burncloud-ui-rebuild rebuild --limit 1 --write
+burncloud-ui-rebuild rebuild --write --limit 1
 ```
 
-### 6. 查看 Agent 施工现场
+Dry run：
 
 ```bat
-cd C:\Users\huang\Work\burncloud
-git worktree list
+burncloud-ui-rebuild dry-run --limit 1
 ```
 
-进入 `agent/ui-rebuild/...` 对应的 worktree：
+模型 Tool Calling 健康检查：
 
 ```bat
-git status --short
-git diff
-git log --oneline -10
+burncloud-ui-rebuild agent-check
 ```
 
-通过页面会留下 `agent(ui): checkpoint <page-id>` 本地提交。
+## Release 边界
 
-### 7. Dry run
+当前 Harness 会：
 
-```bat
-burncloud-ui-rebuild dry-run
+```text
+创建/复用 Agent branch
+修改 Agent worktree
+确定性验证
+本地 page checkpoint commit
+Human Gate
 ```
 
-需要一次 dry-run 覆盖全部 25 页时，通过 CLI/State 显式设置 `page_limit=25`。
+当前 Harness 不会自动：
+
+```text
+push
+创建 PR
+merge
+写 main
+```
+
+这些动作仍属于后续 Release Graph，并且必须在 Human Gate 后执行。

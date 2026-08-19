@@ -50,11 +50,31 @@ def test_prepare_agent_worktree_creates_isolated_branch(tmp_path: Path):
     assert current_branch(worktree) == result["agent_branch"]
     assert result["agent_branch"].startswith("agent/ui-rebuild/")
     assert result["agent_branch"] != "main"
+    assert result["worktree_reused"] is False
     assert head_commit(worktree) == baseline
     assert result["base_commit"] == baseline
     assert porcelain_status(repo) == ""
     assert porcelain_status(worktree) == ""
     assert worktree != repo
+
+
+def test_prepare_agent_worktree_reuses_latest_existing_worktree(tmp_path: Path):
+    repo = _repo(tmp_path)
+    first = prepare_agent_worktree(repo)
+    worktree = Path(first["worktree_root"])
+
+    # Simulate a prior Agent run that left valid in-progress source changes.
+    (worktree / "README.md").write_text("in progress\n", encoding="utf-8")
+    assert porcelain_status(worktree)
+
+    second = prepare_agent_worktree(repo)
+
+    assert second["worktree_reused"] is True
+    assert second["agent_branch"] == first["agent_branch"]
+    assert second["worktree_root"] == first["worktree_root"]
+    assert Path(second["worktree_root"]) == worktree
+    assert porcelain_status(worktree)
+    assert porcelain_status(repo) == ""
 
 
 def test_prepare_agent_worktree_refuses_dirty_main(tmp_path: Path):

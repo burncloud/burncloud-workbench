@@ -9,11 +9,63 @@ from .state import UIRebuildState
 PAGE_NODE_BUILDER = "构建"
 PAGE_NODE_VERIFIER = "验证"
 PAGE_NODE_REVIEWER = "审查"
+PAGE_NODE_CAPTURE_FIX = "保存失败上下文"
 PAGE_NODE_FIXER = "修复"
+PAGE_NODE_FINALIZE_FIX = "整理修复结果"
 
 
 def _after_review(state: UIRebuildState) -> str:
     return "完成" if not state.get("review_findings") else "修复"
+
+
+def _capture_fix_context(state: UIRebuildState) -> dict[str, object]:
+    """Snapshot the exact verifier/reviewer findings before Fixer mutates state."""
+    return {
+        "last_verification_findings": list(state.get("verification_findings", [])),
+        "last_review_findings": list(state.get("review_findings", [])),
+    }
+
+
+def _finalize_fix(state: UIRebuildState) -> dict[str, object]:
+    """Restore the last failure context when Fixer blocks or exhausts retries."""
+    status = state.get("current_page_status", "")
+    fix_round = state.get("fix_round", 0)
+    if status not in {"fix_exhausted", "fix_blocked"}:
+        return {
+            "fixer_report": {
+                "status": status or "fix_applied",
+                "fix_round": fix_round,
+            }
+        }
+
+    verification = list(
+        state.get("verification_findings")
+        or state.get("last_verification_findings", [])
+    )
+    review = list(
+        state.get("review_findings")
+        or state.get("last_review_findings", [])
+    )
+    combined = [*verification, *review]
+    reason_parts = [
+        f"{item.get('code', 'UNKNOWN')}: {item.get('message', '')}".strip()
+        for item in combined
+    ]
+    last_failure_reason = "; ".join(part for part in reason_parts if part)
+    if not last_failure_reason:
+        last_failure_reason = f"{status} after fix round {fix_round}; no structured finding was preserved."
+
+    return {
+        "verification_findings": verification,
+        "review_findings": review,
+        "fixer_report": {
+            "status": status,
+            "fix_round": fix_round,
+            "preserved_verification_findings": verification,
+            "preserved_review_findings": review,
+        },
+        "last_failure_reason": last_failure_reason,
+    }
 
 
 def _after_fix(state: UIRebuildState) -> str:
@@ -27,7 +79,9 @@ def build_page_graph():
     builder.add_node(PAGE_NODE_BUILDER, builder_agent)
     builder.add_node(PAGE_NODE_VERIFIER, verifier)
     builder.add_node(PAGE_NODE_REVIEWER, reviewer)
+    builder.add_node(PAGE_NODE_CAPTURE_FIX, _capture_fix_context)
     builder.add_node(PAGE_NODE_FIXER, fixer)
+    builder.add_node(PAGE_NODE_FINALIZE_FIX, _finalize_fix)
 
     builder.add_edge(START, PAGE_NODE_BUILDER)
     builder.add_edge(PAGE_NODE_BUILDER, PAGE_NODE_VERIFIER)
@@ -35,10 +89,12 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_REVIEWER,
         _after_review,
-        {"完成": END, "修复": PAGE_NODE_FIXER},
+        {"完成": END, "修复": PAGE_NODE_CAPTURE_FIX},
     )
+    builder.add_edge(PAGE_NODE_CAPTURE_FIX, PAGE_NODE_FIXER)
+    builder.add_edge(PAGE_NODE_FIXER, PAGE_NODE_FINALIZE_FIX)
     builder.add_conditional_edges(
-        PAGE_NODE_FIXER,
+        PAGE_NODE_FINALIZE_FIX,
         _after_fix,
         {"重新验证": PAGE_NODE_VERIFIER, "人工介入": END},
     )

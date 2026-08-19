@@ -48,6 +48,8 @@ def _after_plan_guard(state: UIRebuildState) -> str:
 def _after_builder(state: UIRebuildState) -> str:
     if state.get("current_page_status") in {"builder_blocked", "budget_exhausted"}:
         return "人工介入"
+    if state.get("execution_mode") == "dry_run":
+        return "代码验证"
     return "范围检查"
 
 
@@ -140,16 +142,16 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_PLAN_GUARD,
         _after_plan_guard,
-        {
-            "实施": PAGE_NODE_BUILDER,
-            "重新规划": PAGE_NODE_PLANNER,
-            "人工介入": END,
-        },
+        {"实施": PAGE_NODE_BUILDER, "重新规划": PAGE_NODE_PLANNER, "人工介入": END},
     )
     builder.add_conditional_edges(
         PAGE_NODE_BUILDER,
         _after_builder,
-        {"范围检查": PAGE_NODE_SCOPE_GUARD, "人工介入": END},
+        {
+            "范围检查": PAGE_NODE_SCOPE_GUARD,
+            "代码验证": PAGE_NODE_CODE_VERIFY,
+            "人工介入": END,
+        },
     )
     builder.add_conditional_edges(
         PAGE_NODE_SCOPE_GUARD,

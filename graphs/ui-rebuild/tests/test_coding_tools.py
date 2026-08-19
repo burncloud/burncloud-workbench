@@ -87,7 +87,7 @@ def test_write_tools_are_confined_to_source_root(tmp_path):
         })
 
 
-def test_create_tool_never_overwrites_existing_file(tmp_path):
+def test_routine_write_refusals_are_recoverable(tmp_path):
     source = tmp_path / "burncloud"
     workbench = tmp_path / "burncloud-workbench"
     source.mkdir()
@@ -97,10 +97,17 @@ def test_create_tool_never_overwrites_existing_file(tmp_path):
 
     tools = _tool_map(source, workbench, allow_write=True)
 
-    with pytest.raises(ToolSafetyError):
-        tools["create_source_file"].invoke({
-            "path": "existing.rs",
-            "content": "overwrite attempt",
-        })
+    create_result = tools["create_source_file"].invoke({
+        "path": "existing.rs",
+        "content": "overwrite attempt",
+    })
+    replace_result = tools["replace_source_text"].invoke({
+        "path": "existing.rs",
+        "old": "does not exist",
+        "new": "replacement",
+        "expected_occurrences": 1,
+    })
 
+    assert "CREATE_REFUSED" in create_result
+    assert "REPLACEMENT_REFUSED" in replace_result
     assert existing.read_text(encoding="utf-8") == "keep me"

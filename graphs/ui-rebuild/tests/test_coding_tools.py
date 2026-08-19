@@ -1,19 +1,25 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from burncloud_ui_rebuild.coding_tools import ToolSafetyError, build_coding_tools
 
 
-def _tool_map(source: Path, workbench: Path, *, allow_write: bool):
+def _tool_map(source: Path, workbench: Path, *, allow_write: bool, expected_branch: str | None = None):
     return {
         item.name: item
         for item in build_coding_tools(
             source_root=source,
             workbench_root=workbench,
             allow_write=allow_write,
+            expected_branch=expected_branch,
         )
     }
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
 
 
 def test_read_only_toolset_has_no_source_write_tools(tmp_path):
@@ -136,3 +142,41 @@ def test_agent_write_budget_limits_distinct_files(tmp_path):
 
     assert "WRITE_BUDGET_REFUSED" in refused
     assert not (source / "src" / "file_8.rs").exists()
+
+
+def test_write_tools_refuse_protected_or_mismatched_branch(tmp_path):
+    source = tmp_path / "burncloud"
+    workbench = tmp_path / "burncloud-workbench"
+    source.mkdir()
+    workbench.mkdir()
+    _git(source, "init", "-b", "main")
+    _git(source, "config", "user.email", "agent-test@example.com")
+    _git(source, "config", "user.name", "Agent Test")
+    target = source / "app.rs"
+    target.write_text("old\n", encoding="utf-8")
+    _git(source, "add", "app.rs")
+    _git(source, "commit", "-m", "baseline")
+
+    tools = _tool_map(
+        source,
+        workbench,
+        allow_write=True,
+        expected_branch="agent/ui-rebuild/example",
+    )
+
+    with pytest.raises(ToolSafetyError, match="protected branch"):
+        tools["replace_source_text"].invoke({
+            "path": "app.rs",
+            "old": "old",
+            "new": "new",
+            "expected_occurrences": 1,
+        })
+
+    _git(source, "switch", "-c", "agent/ui-rebuild/other")
+    with pytest.raises(ToolSafetyError, match="branch mismatch"):
+        tools["replace_source_text"].invoke({
+            "path": "app.rs",
+            "old": "old",
+            "new": "new",
+            "expected_occurrences": 1,
+        })

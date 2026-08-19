@@ -133,19 +133,9 @@ Graph discipline:
 """.strip()
 
 
-def run_page_scout_agent(
-    *,
-    model_name: str,
-    source_root: str,
-    workbench_root: str,
-    page: dict[str, Any],
-) -> dict[str, Any]:
+def run_page_scout_agent(*, model_name: str, source_root: str, workbench_root: str, page: dict[str, Any]) -> dict[str, Any]:
     budget = DEFAULT_POLICY.scout_budget
-    tools = build_coding_tools(
-        source_root=source_root,
-        workbench_root=workbench_root,
-        allow_write=False,
-    )
+    tools = build_coding_tools(source_root=source_root, workbench_root=workbench_root, allow_write=False)
     agent = create_agent(
         model=create_chat_model(model_name, timeout=budget.model_timeout_seconds),
         tools=tools,
@@ -161,39 +151,19 @@ Scout rules:
 """,
         response_format=ToolStrategy(ScoutReport),
     )
-    prompt = {
-        "task": "Discover the minimum current-source context needed to implement this page contract.",
-        "page": page,
-        "required_contract": page["contract_path"],
-    }
+    prompt = {"task": "Discover the minimum current-source context needed to implement this page contract.", "page": page, "required_contract": page["contract_path"]}
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
     if not isinstance(report, ScoutReport):
-        report = ScoutReport(
-            status="BLOCKED",
-            summary="Scout stopped before producing a validated report.",
-            constraints=[_last_text(result) or "SCOUT_BUDGET_OR_EARLY_TERMINATION"],
-        )
+        report = ScoutReport(status="BLOCKED", summary="Scout stopped before producing a validated report.", constraints=[_last_text(result) or "SCOUT_BUDGET_OR_EARLY_TERMINATION"])
     payload = report.model_dump()
     payload["_usage"] = _usage(result, "scout")
     return payload
 
 
-def run_planner_agent(
-    *,
-    model_name: str,
-    source_root: str,
-    workbench_root: str,
-    page: dict[str, Any],
-    scout_report: dict[str, Any],
-    previous_plan_findings: list[dict[str, Any]],
-) -> dict[str, Any]:
+def run_planner_agent(*, model_name: str, source_root: str, workbench_root: str, page: dict[str, Any], scout_report: dict[str, Any], previous_plan_findings: list[dict[str, Any]]) -> dict[str, Any]:
     budget = DEFAULT_POLICY.planner_budget
-    tools = build_coding_tools(
-        source_root=source_root,
-        workbench_root=workbench_root,
-        allow_write=False,
-    )
+    tools = build_coding_tools(source_root=source_root, workbench_root=workbench_root, allow_write=False)
     agent = create_agent(
         model=create_chat_model(model_name, timeout=budget.model_timeout_seconds),
         tools=tools,
@@ -210,35 +180,17 @@ Planner rules:
 """,
         response_format=ToolStrategy(ImplementationPlan),
     )
-    prompt = {
-        "task": "Produce a bounded implementation plan for this page.",
-        "page": page,
-        "scout_report": scout_report,
-        "previous_plan_findings": previous_plan_findings,
-    }
+    prompt = {"task": "Produce a bounded implementation plan for this page.", "page": page, "scout_report": scout_report, "previous_plan_findings": previous_plan_findings}
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
     if not isinstance(report, ImplementationPlan):
-        report = ImplementationPlan(
-            status="BLOCKED",
-            summary="Planner stopped before producing a validated plan.",
-            risks=[_last_text(result) or "PLANNER_BUDGET_OR_EARLY_TERMINATION"],
-        )
+        report = ImplementationPlan(status="BLOCKED", summary="Planner stopped before producing a validated plan.", risks=[_last_text(result) or "PLANNER_BUDGET_OR_EARLY_TERMINATION"])
     payload = report.model_dump()
     payload["_usage"] = _usage(result, "planner")
     return payload
 
 
-def run_planned_builder_agent(
-    *,
-    model_name: str,
-    source_root: str,
-    workbench_root: str,
-    agent_branch: str,
-    page: dict[str, Any],
-    scout_report: dict[str, Any],
-    implementation_plan: dict[str, Any],
-) -> dict[str, Any]:
+def run_planned_builder_agent(*, model_name: str, source_root: str, workbench_root: str, agent_branch: str, page: dict[str, Any], scout_report: dict[str, Any], implementation_plan: dict[str, Any]) -> dict[str, Any]:
     budget = DEFAULT_POLICY.builder_budget
     allowed_files = list(implementation_plan.get("allowed_files", []))
     tools = build_coding_tools(
@@ -263,42 +215,19 @@ Builder rules:
 """,
         response_format=ToolStrategy(BuilderReport),
     )
-    prompt = {
-        "task": "Implement exactly the approved plan for this page.",
-        "page": page,
-        "scout_report": scout_report,
-        "implementation_plan": implementation_plan,
-    }
+    prompt = {"task": "Implement exactly the approved plan for this page.", "page": page, "scout_report": scout_report, "implementation_plan": implementation_plan}
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
     if not isinstance(report, BuilderReport):
-        report = BuilderReport(
-            status="BLOCKED",
-            summary="Builder stopped before producing a validated report.",
-            known_gaps=[_last_text(result) or "BUILDER_BUDGET_OR_EARLY_TERMINATION"],
-        )
+        report = BuilderReport(status="BLOCKED", summary="Builder stopped before producing a validated report.", known_gaps=[_last_text(result) or "BUILDER_BUDGET_OR_EARLY_TERMINATION"])
     payload = report.model_dump()
     payload["_usage"] = _usage(result, "builder")
     return payload
 
 
-def run_v1_reviewer_agent(
-    *,
-    model_name: str,
-    source_root: str,
-    workbench_root: str,
-    page: dict[str, Any],
-    scout_report: dict[str, Any],
-    implementation_plan: dict[str, Any],
-    verification_findings: list[dict[str, Any]],
-    changed_files: list[str],
-) -> dict[str, Any]:
+def run_v1_reviewer_agent(*, model_name: str, source_root: str, workbench_root: str, page: dict[str, Any], scout_report: dict[str, Any], implementation_plan: dict[str, Any], verification_findings: list[dict[str, Any]], changed_files: list[str]) -> dict[str, Any]:
     budget = DEFAULT_POLICY.reviewer_budget
-    tools = build_coding_tools(
-        source_root=source_root,
-        workbench_root=workbench_root,
-        allow_write=False,
-    )
+    tools = build_coding_tools(source_root=source_root, workbench_root=workbench_root, allow_write=False)
     agent = create_agent(
         model=create_chat_model(model_name, timeout=budget.model_timeout_seconds),
         tools=tools,
@@ -315,27 +244,14 @@ Reviewer rules:
 """,
         response_format=ToolStrategy(ReviewerReport),
     )
-    prompt = {
-        "task": "Independently judge whether this page can pass the product gate.",
-        "page": page,
-        "scout_report": scout_report,
-        "implementation_plan": implementation_plan,
-        "verification_findings": verification_findings,
-        "changed_files": changed_files,
-    }
+    prompt = {"task": "Independently judge whether this page can pass the product gate.", "page": page, "scout_report": scout_report, "implementation_plan": implementation_plan, "verification_findings": verification_findings, "changed_files": changed_files}
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
     if not isinstance(report, ReviewerReport):
         report = ReviewerReport(
             decision="FAIL",
             summary="Reviewer stopped before producing a validated report.",
-            findings=[Finding(
-                severity="major",
-                code="REVIEWER_BUDGET_OR_EARLY_TERMINATION",
-                message="Reviewer did not finish inside its Agent budget.",
-                evidence=_last_text(result),
-                expected="Complete an independent bounded review.",
-            )],
+            findings=[Finding(severity="major", code="REVIEWER_BUDGET_OR_EARLY_TERMINATION", message="Reviewer did not finish inside its Agent budget.", evidence=_last_text(result), expected="Complete an independent bounded review.")],
         )
     payload = report.model_dump()
     payload["_usage"] = _usage(result, "reviewer")
@@ -352,6 +268,7 @@ def run_v1_fixer_agent(
     implementation_plan: dict[str, Any],
     verification_findings: list[dict[str, Any]],
     review_findings: list[dict[str, Any]],
+    restore_files: list[str],
 ) -> dict[str, Any]:
     budget = DEFAULT_POLICY.fixer_budget
     allowed_files = list(implementation_plan.get("allowed_files", []))
@@ -361,6 +278,7 @@ def run_v1_fixer_agent(
         allow_write=True,
         expected_branch=agent_branch,
         allowed_write_files=allowed_files,
+        allowed_restore_files=restore_files,
     )
     agent = create_agent(
         model=create_chat_model(model_name, timeout=budget.model_timeout_seconds),
@@ -370,8 +288,9 @@ def run_v1_fixer_agent(
 
 Fixer rules:
 - Fix only supplied blocking findings inside the already-approved plan scope.
-- Do not add new files to the plan or perform unrelated refactors.
-- For scope pollution in an approved tracked file, restore that file if the whole change is unrelated.
+- Do not add new editable files to the plan or perform unrelated refactors.
+- Files outside allowed_files may only be discarded with restore_source_file when they are explicitly listed in restore_files because they are already dirty scope pollution.
+- restore_source_file does NOT grant edit permission to that file.
 - If a finding requires a backend capability not approved for this page graph, return BLOCKED and preserve the BackendGap.
 - Leave deterministic validation to the graph after you finish.
 """,
@@ -383,15 +302,12 @@ Fixer rules:
         "implementation_plan": implementation_plan,
         "verification_findings": verification_findings,
         "review_findings": review_findings,
+        "restore_files": restore_files,
     }
     result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]})
     report = result.get("structured_response")
     if not isinstance(report, FixerReport):
-        report = FixerReport(
-            status="BLOCKED",
-            summary="Fixer stopped before producing a validated report.",
-            known_gaps=[_last_text(result) or "FIXER_BUDGET_OR_EARLY_TERMINATION"],
-        )
+        report = FixerReport(status="BLOCKED", summary="Fixer stopped before producing a validated report.", known_gaps=[_last_text(result) or "FIXER_BUDGET_OR_EARLY_TERMINATION"])
     payload = report.model_dump()
     payload["_usage"] = _usage(result, "fixer")
     return payload

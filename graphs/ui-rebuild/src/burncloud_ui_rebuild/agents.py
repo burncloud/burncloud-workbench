@@ -122,6 +122,8 @@ Engineering rules:
 - Discover source paths with search_source/list_source_directory before reading a path that was not already returned by a tool or supplied as an approved known path.
 - Never invent repository paths from module names. If a read/list/search returns NOT_FOUND, treat it as recoverable: discover the real path and retry.
 - Make the smallest correct change for the assigned scope.
+- The write toolset enforces a hard budget of at most 8 distinct files per Agent invocation. Do not work around that limit; report BLOCKED if the page genuinely requires broader work.
+- Never run or request crate-wide/workspace-wide formatting. If formatting is required, call format_source_file only for Rust files you intentionally changed.
 - Reuse existing BurnCloud components and patterns where they satisfy the target contract.
 - Never access .git internals.
 - Never commit, push, merge, publish, install packages, or execute arbitrary shell commands.
@@ -156,7 +158,8 @@ Builder-specific rules:
 - Inspect the real route, component, data source, and nearby shared components before editing.
 - If a prerequisite foundation is missing, implement only the minimum prerequisite required by this page; do not rebuild unrelated pages.
 - In write mode, use targeted replacement/create tools and inspect git_diff afterward.
-- Run cargo_fmt_check and client_check when source changes are made unless a concrete repository limitation blocks them.
+- Format only Rust files you intentionally changed, using format_source_file one file at a time.
+- Run cargo_fmt_check and client_check after source changes unless a concrete repository limitation blocks them.
 - In read-only mode, produce a plan and report BLOCKED rather than pretending files changed.
 """,
         response_format=ToolStrategy(BuilderReport),
@@ -208,6 +211,7 @@ Reviewer-specific rules:
 - Read the assigned Page Contract and inspect the actual git diff/current source.
 - Judge Product Contract, role boundary, state completeness, security/privacy, consistency, and regression risk.
 - Deterministic verification findings are evidence and cannot be ignored.
+- Treat unexpectedly broad diffs as a scope/regression risk, especially when unrelated pages or files changed.
 - Do not redesign the page. Return PASS only when there are no blocker/major correctness findings for the assigned scope.
 - Every FAIL finding must include severity, stable code, evidence, and expected correction.
 """,
@@ -256,6 +260,7 @@ Fixer-specific rules:
 - Fix only the supplied Reviewer findings for the assigned page.
 - Do not perform unrelated refactors or redesigns.
 - Inspect the exact evidence before editing.
+- Format only Rust files you intentionally changed, using format_source_file one file at a time.
 - After edits, inspect git_diff and run the relevant allowlisted validations.
 - If a finding cannot be fixed safely inside the assigned scope, report BLOCKED and explain the concrete gap.
 """,

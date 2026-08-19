@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 from langchain_openai import ChatOpenAI
 
 
 # CLI commands need the same local .env behavior as `langgraph dev`. Existing
-# process environment always wins because override=False.
+# process environment wins by design so deployment-injected secrets are never
+# silently replaced by a local file.
 load_dotenv(override=False)
 
 
@@ -35,6 +37,11 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _fingerprint(value: str) -> str:
+    """Return a short non-reversible identifier suitable for safe diagnostics."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
 def load_runtime_secrets() -> RuntimeSecrets:
     """Load the three approved runtime parameters from the process environment."""
     return RuntimeSecrets(
@@ -42,6 +49,24 @@ def load_runtime_secrets() -> RuntimeSecrets:
         base_url=_required_env("BASE_URL").rstrip("/"),
         langsmith_api_key=_required_env("LANGSMITH_API_KEY"),
     )
+
+
+def runtime_diagnostics() -> dict[str, Any]:
+    """Describe active model configuration without ever exposing secret values."""
+    runtime = load_runtime_secrets()
+    dotenv_path = find_dotenv(usecwd=True)
+    dotenv_api_key = ""
+    if dotenv_path:
+        dotenv_api_key = str(dotenv_values(dotenv_path).get("API_KEY") or "").strip()
+
+    return {
+        "base_url": runtime.base_url,
+        "api_key_length": len(runtime.api_key),
+        "api_key_fingerprint": _fingerprint(runtime.api_key),
+        "dotenv_found": bool(dotenv_path),
+        "dotenv_api_key_present": bool(dotenv_api_key),
+        "matches_dotenv": bool(dotenv_api_key) and runtime.api_key == dotenv_api_key,
+    }
 
 
 def create_chat_model(model_name: str, **kwargs: Any) -> ChatOpenAI:

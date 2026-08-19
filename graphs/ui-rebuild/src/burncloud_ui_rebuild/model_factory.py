@@ -15,6 +15,13 @@ from langchain_openai import ChatOpenAI
 load_dotenv(override=False)
 
 
+# OpenAI-compatible model requests may occasionally fail with transient 5xx/
+# connection/rate-limit errors. The OpenAI Python client retries those classes
+# automatically; raise the default from the SDK default (2) to a more resilient
+# Harness default. Callers can still override max_retries explicitly.
+DEFAULT_MODEL_MAX_RETRIES = 6
+
+
 @dataclass(frozen=True)
 class RuntimeSecrets:
     """Runtime-only secrets and endpoint configuration.
@@ -66,6 +73,7 @@ def runtime_diagnostics() -> dict[str, Any]:
         "dotenv_found": bool(dotenv_path),
         "dotenv_api_key_present": bool(dotenv_api_key),
         "matches_dotenv": bool(dotenv_api_key) and runtime.api_key == dotenv_api_key,
+        "default_model_max_retries": DEFAULT_MODEL_MAX_RETRIES,
     }
 
 
@@ -80,6 +88,7 @@ def create_chat_model(model_name: str, **kwargs: Any) -> ChatOpenAI:
         raise ValueError("model_name must not be empty")
 
     runtime = load_runtime_secrets()
+    kwargs.setdefault("max_retries", DEFAULT_MODEL_MAX_RETRIES)
     return ChatOpenAI(
         model=model_name.strip(),
         api_key=runtime.api_key,

@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 
@@ -30,7 +31,8 @@ def _required_env(name: str) -> str:
 
 
 def load_runtime_secrets() -> RuntimeSecrets:
-    """Load the three approved runtime parameters from environment variables."""
+    """Load the three approved runtime parameters from local environment or .env."""
+    load_dotenv(override=False)
     return RuntimeSecrets(
         api_key=_required_env("API_KEY"),
         base_url=_required_env("BASE_URL").rstrip("/"),
@@ -45,9 +47,12 @@ def create_chat_model(model_name: str, **kwargs: Any) -> ChatOpenAI:
     another environment variable. This keeps the runtime secret surface limited to the
     three approved parameters: API_KEY, BASE_URL and LANGSMITH_API_KEY.
     """
+    if not model_name.strip():
+        raise ValueError("model_name must not be empty")
+
     runtime = load_runtime_secrets()
     return ChatOpenAI(
-        model=model_name,
+        model=model_name.strip(),
         api_key=runtime.api_key,
         base_url=runtime.base_url,
         **kwargs,

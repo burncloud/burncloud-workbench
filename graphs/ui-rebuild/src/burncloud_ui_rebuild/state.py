@@ -56,6 +56,7 @@ class UIRebuildState(TypedDict, total=False):
     implementation_results: list[dict[str, Any]]
     builder_report: dict[str, Any]
     fixer_report: dict[str, Any]
+    review_summary: str
     changed_files: list[str]
     validation_results: list[dict[str, Any]]
     verification_findings: list[Finding]
@@ -64,6 +65,9 @@ class UIRebuildState(TypedDict, total=False):
     last_review_findings: list[Finding]
     last_failure_reason: str
     fix_round: int
+
+    page_checkpoint: dict[str, Any]
+    page_checkpoint_history: list[dict[str, Any]]
 
     final_findings: list[Finding]
     human_decision: bool

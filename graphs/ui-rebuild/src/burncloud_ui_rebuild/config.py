@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 DEFAULT_MODEL_NAME = "gpt-5.6-sol"
+DEFAULT_EXECUTION_MODE = "write"
 
 
 def workbench_root() -> Path:

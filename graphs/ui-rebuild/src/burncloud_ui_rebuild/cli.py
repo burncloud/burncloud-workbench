@@ -7,6 +7,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from burncloud_ui_rebuild.agents import run_agent_check
+from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME
 from burncloud_ui_rebuild.graph import build_graph, initial_state
 
 
@@ -14,6 +15,9 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
     if "__interrupt__" in result:
         print(json.dumps({
             "status": "awaiting_human_gate",
+            "model_name": result.get("model_name", DEFAULT_MODEL_NAME),
+            "agent_branch": result.get("agent_branch", ""),
+            "worktree_root": result.get("worktree_root", ""),
             "completed_pages": len(result.get("completed_pages", [])),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
@@ -25,6 +29,9 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
     if "__interrupt__" not in result:
         print(json.dumps({
             "status": result.get("release_status", result.get("phase")),
+            "model_name": result.get("model_name", DEFAULT_MODEL_NAME),
+            "agent_branch": result.get("agent_branch", ""),
+            "worktree_root": result.get("worktree_root", ""),
             "completed_pages": len(result.get("completed_pages", [])),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
@@ -37,36 +44,44 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     dry = sub.add_parser("dry-run", help="Run all 25 target page tasks without modifying burncloud/burncloud.")
-    dry.add_argument("--thread-id", default="burncloud-ui-rebuild-v0.1")
+    dry.add_argument("--thread-id", default="burncloud-ui-rebuild-v0.3")
     dry.add_argument("--approve", action="store_true", help="Automatically approve the final human gate.")
 
     check = sub.add_parser(
         "agent-check",
         help="Verify create_agent model access and tool calling without modifying source files.",
     )
-    check.add_argument("--model", required=True, help="Model name exposed by the configured BASE_URL endpoint.")
+    check.add_argument(
+        "--model",
+        default=DEFAULT_MODEL_NAME,
+        help=f"Model exposed by BASE_URL. Defaults to {DEFAULT_MODEL_NAME}.",
+    )
 
     rebuild = sub.add_parser(
         "rebuild",
-        help="Run real Builder/Verifier/Reviewer/Fixer Agents against the local BurnCloud source tree.",
+        help="Create an isolated Agent branch/worktree and run real Builder/Verifier/Reviewer/Fixer Agents there.",
     )
-    rebuild.add_argument("--model", required=True, help="Model name exposed by the configured BASE_URL endpoint.")
+    rebuild.add_argument(
+        "--model",
+        default=DEFAULT_MODEL_NAME,
+        help=f"Model exposed by BASE_URL. Defaults to {DEFAULT_MODEL_NAME}.",
+    )
     rebuild.add_argument(
         "--limit",
         type=int,
         default=1,
         help="Maximum number of target pages for this run. Defaults to 1 for safe first execution.",
     )
-    rebuild.add_argument("--thread-id", default="burncloud-ui-rebuild-live-v0.2")
+    rebuild.add_argument("--thread-id", default="burncloud-ui-rebuild-live-v0.3")
     rebuild.add_argument(
         "--write",
         action="store_true",
-        help="Required acknowledgement that Agents may modify the local burncloud source working tree.",
+        help="Required acknowledgement that Agents may modify a newly-created isolated BurnCloud worktree.",
     )
     rebuild.add_argument(
         "--approve",
         action="store_true",
-        help="Resume the final Human Gate. This still does not commit, push, or merge Git changes.",
+        help="Resume the final Human Gate. This still does not commit, push, merge, or modify main.",
     )
 
     args = parser.parse_args()
@@ -90,7 +105,7 @@ def main() -> None:
 
     if args.command == "rebuild":
         if not args.write:
-            parser.error("rebuild requires --write because live Builder/Fixer Agents can modify burncloud source files")
+            parser.error("rebuild requires --write because live Builder/Fixer Agents can modify the isolated Agent worktree")
         if args.limit < 1 or args.limit > 25:
             parser.error("--limit must be between 1 and 25")
 

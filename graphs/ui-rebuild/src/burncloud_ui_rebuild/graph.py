@@ -7,7 +7,6 @@ from burncloud_ui_rebuild.nodes import (
     architecture_agent,
     bootstrap,
     final_permission_check,
-    human_gate,
     mark_page_complete,
     permission_guardian,
     prepare_worktree,
@@ -19,7 +18,7 @@ from burncloud_ui_rebuild.nodes import (
 )
 from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.policy import DEFAULT_POLICY
-from burncloud_ui_rebuild.quality_nodes import page_checkpoint
+from burncloud_ui_rebuild.quality_nodes import human_review_gate, page_checkpoint
 from burncloud_ui_rebuild.state import UIRebuildState
 
 
@@ -80,7 +79,7 @@ def build_graph(checkpointer=None):
     builder.add_node(NODE_PAGE_CHECKPOINT, page_checkpoint)
     builder.add_node(NODE_MARK_COMPLETE, mark_page_complete)
     builder.add_node(NODE_FINAL_PERMISSION, final_permission_check)
-    builder.add_node(NODE_HUMAN_GATE, human_gate)
+    builder.add_node(NODE_HUMAN_GATE, human_review_gate)
     builder.add_node(NODE_RELEASE, release_agent)
 
     builder.add_edge(START, NODE_DEFAULT_MODE)

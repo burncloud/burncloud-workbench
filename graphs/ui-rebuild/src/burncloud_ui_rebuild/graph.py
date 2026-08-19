@@ -13,6 +13,7 @@ from burncloud_ui_rebuild.nodes import (
     repo_scout,
     select_next_page,
     spec_agent,
+    write_preflight,
 )
 from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.state import UIRebuildState
@@ -35,6 +36,7 @@ def build_graph(checkpointer=None):
     builder.add_node("spec_agent", spec_agent)
     builder.add_node("repo_scout", repo_scout)
     builder.add_node("permission_guardian", permission_guardian)
+    builder.add_node("write_preflight", write_preflight)
     builder.add_node("architecture_agent", architecture_agent)
     builder.add_node("select_next_page", select_next_page)
     builder.add_node("page_rebuild", page_rebuild)
@@ -46,7 +48,8 @@ def build_graph(checkpointer=None):
     builder.add_edge(START, "spec_agent")
     builder.add_edge("spec_agent", "repo_scout")
     builder.add_edge("repo_scout", "permission_guardian")
-    builder.add_edge("permission_guardian", "architecture_agent")
+    builder.add_edge("permission_guardian", "write_preflight")
+    builder.add_edge("write_preflight", "architecture_agent")
     builder.add_edge("architecture_agent", "select_next_page")
 
     builder.add_conditional_edges(
@@ -70,8 +73,14 @@ def build_graph(checkpointer=None):
     return builder.compile(checkpointer=checkpointer)
 
 
-def initial_state(*, execution_mode: str = "dry_run", thread_id: str = "burncloud-ui-rebuild-v0.1") -> UIRebuildState:
-    return {
+def initial_state(
+    *,
+    execution_mode: str = "dry_run",
+    thread_id: str = "burncloud-ui-rebuild-v0.1",
+    model_name: str = "",
+    page_limit: int | None = None,
+) -> UIRebuildState:
+    state: UIRebuildState = {
         "thread_id": thread_id,
         "execution_mode": execution_mode,  # type: ignore[typeddict-item]
         "source_repo_root": str(source_root()),
@@ -82,6 +91,11 @@ def initial_state(*, execution_mode: str = "dry_run", thread_id: str = "burnclou
         "warnings": [],
         "phase": "start",
     }
+    if model_name:
+        state["model_name"] = model_name
+    if page_limit is not None:
+        state["page_limit"] = page_limit
+    return state
 
 
 # Exported Agent Server / Studio graph. Agent Server injects persistence at runtime.

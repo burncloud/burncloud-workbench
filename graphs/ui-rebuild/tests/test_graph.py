@@ -16,3 +16,19 @@ def test_dry_run_processes_all_pages_then_waits_for_human():
 
     resumed = graph.invoke(Command(resume=True), config=config)
     assert resumed["release_status"] == "dry_run_complete_no_git_write"
+
+
+def test_dry_run_can_limit_scope_to_first_golden_page():
+    state = initial_state(
+        execution_mode="dry_run",
+        thread_id="test-ui-rebuild-one-page",
+        page_limit=1,
+    )
+    graph = build_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "test-ui-rebuild-one-page"}}
+
+    result = graph.invoke(state, config=config)
+
+    assert result["completed_pages"] == ["buyer-overview"]
+    assert len(result["page_queue"]) == 1
+    assert "__interrupt__" in result

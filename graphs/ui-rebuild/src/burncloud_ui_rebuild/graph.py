@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root, workbench_root
+from burncloud_ui_rebuild.config import DEFAULT_EXECUTION_MODE, DEFAULT_MODEL_NAME, source_root, workbench_root
 from burncloud_ui_rebuild.nodes import (
     architecture_agent,
     bootstrap,
@@ -21,6 +21,13 @@ from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.state import UIRebuildState
 
 
+def default_execution_mode(state: UIRebuildState) -> dict[str, str]:
+    """Default Studio/Agent Server runs to live write mode unless explicitly overridden."""
+    return {
+        "execution_mode": state.get("execution_mode", DEFAULT_EXECUTION_MODE),
+    }
+
+
 def _page_router(state: UIRebuildState) -> str:
     return "final_permission_check" if state.get("current_page") is None else "page_rebuild"
 
@@ -33,6 +40,7 @@ def build_graph(checkpointer=None):
     page_rebuild = build_page_graph()
     builder = StateGraph(UIRebuildState)
 
+    builder.add_node("default_execution_mode", default_execution_mode)
     builder.add_node("bootstrap", bootstrap)
     builder.add_node("spec_agent", spec_agent)
     builder.add_node("repo_scout", repo_scout)
@@ -47,7 +55,8 @@ def build_graph(checkpointer=None):
     builder.add_node("human_gate", human_gate)
     builder.add_node("release", release_agent)
 
-    builder.add_edge(START, "bootstrap")
+    builder.add_edge(START, "default_execution_mode")
+    builder.add_edge("default_execution_mode", "bootstrap")
     builder.add_edge("bootstrap", "spec_agent")
     builder.add_edge("spec_agent", "repo_scout")
     builder.add_edge("repo_scout", "permission_guardian")
@@ -79,7 +88,7 @@ def build_graph(checkpointer=None):
 
 def initial_state(
     *,
-    execution_mode: str = "dry_run",
+    execution_mode: str = DEFAULT_EXECUTION_MODE,
     thread_id: str = "burncloud-ui-rebuild-v0.3",
     model_name: str = DEFAULT_MODEL_NAME,
     page_limit: int | None = None,

@@ -145,7 +145,7 @@ def permission_guardian(state: UIRebuildState) -> dict[str, Any]:
 
 
 def prepare_worktree(state: UIRebuildState) -> dict[str, Any]:
-    """Create or reuse an isolated Agent branch/worktree for live writes."""
+    """Create once, then reuse the same isolated Agent branch/worktree across runs."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"phase": "worktree_skipped"}
 
@@ -160,17 +160,24 @@ def prepare_worktree(state: UIRebuildState) -> dict[str, Any]:
             raise RuntimeError(
                 f"Recorded Agent worktree branch mismatch: expected {existing_branch!r}, found {actual!r}."
             )
-        return {"source_repo_root": str(root), "phase": "worktree_reused"}
+        return {
+            "source_repo_root": str(root),
+            "worktree_reused": True,
+            "phase": "worktree_reused",
+        }
 
     prepared = prepare_agent_worktree(
         state["base_repo_root"],
         base_branch=state.get("base_branch", "main"),
     )
-    return {**prepared, "phase": "worktree_prepared"}
+    return {
+        **prepared,
+        "phase": "worktree_reused" if prepared.get("worktree_reused") else "worktree_prepared",
+    }
 
 
 def write_preflight(state: UIRebuildState) -> dict[str, Any]:
-    """Refuse live Agent writes unless they target a clean isolated non-main worktree."""
+    """Protect main while allowing an existing Agent worktree to keep its in-progress diff."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"phase": "write_preflight_skipped"}
 
@@ -190,16 +197,33 @@ def write_preflight(state: UIRebuildState) -> dict[str, Any]:
             f"Agent worktree branch mismatch: expected {expected_branch!r}, current branch is {actual_branch!r}."
         )
 
+    if porcelain_status(base):
+        raise RuntimeError("Primary BurnCloud checkout is dirty; refusing Agent writes until main is clean.")
+
     status = porcelain_status(source)
-    if status:
+    reused = bool(state.get("worktree_reused", False))
+    if status and not reused:
         raise RuntimeError(
-            "Live rebuild requires a clean Agent worktree before Builder starts. "
+            "A newly-created Agent worktree must start clean before Builder writes. "
             f"Current git status:\n{status}"
         )
-    if porcelain_status(base):
-        raise RuntimeError("Primary BurnCloud checkout became dirty after Agent worktree creation; refusing to proceed.")
 
-    return {"source_baseline_status": "clean", "phase": "write_preflight_passed"}
+    warnings = list(state.get("warnings", []))
+    if status and reused:
+        warnings.append(
+            "Reusing the existing UI rebuild worktree with in-progress Agent changes; this run will continue that diff."
+        )
+        baseline_status = "continuing_existing_changes"
+    elif reused:
+        baseline_status = "reused_clean_worktree"
+    else:
+        baseline_status = "clean_new_worktree"
+
+    return {
+        "source_baseline_status": baseline_status,
+        "warnings": warnings,
+        "phase": "write_preflight_passed",
+    }
 
 
 def architecture_agent(state: UIRebuildState) -> dict[str, Any]:
@@ -467,6 +491,7 @@ def human_gate(state: UIRebuildState) -> dict[str, Any]:
         "base_commit": state.get("base_commit", ""),
         "agent_branch": state.get("agent_branch", ""),
         "worktree_root": state.get("worktree_root", ""),
+        "worktree_reused": state.get("worktree_reused", False),
         "current_page": state.get("current_page"),
         "current_page_status": state.get("current_page_status", ""),
         "fix_round": state.get("fix_round", 0),

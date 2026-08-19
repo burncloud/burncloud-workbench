@@ -128,6 +128,14 @@ def git_status(source_root: str | Path) -> str:
     return str(result["output"])
 
 
+def git_branch(source_root: str | Path) -> str:
+    root = Path(source_root).resolve()
+    result = _run(root, ["git", "branch", "--show-current"], timeout=30)
+    if result["returncode"] != 0:
+        raise RuntimeError(str(result["output"]))
+    return str(result["output"]).strip()
+
+
 def changed_source_files(source_root: str | Path) -> list[str]:
     status = git_status(source_root)
     changed: list[str] = []
@@ -159,10 +167,22 @@ def build_coding_tools(
     source_root: str | Path,
     workbench_root: str | Path,
     allow_write: bool,
+    expected_branch: str | None = None,
 ):
     source = Path(source_root).resolve()
     workbench = Path(workbench_root).resolve()
     written_paths: set[str] = set()
+
+    def assert_write_branch() -> None:
+        if not allow_write or not expected_branch:
+            return
+        actual = git_branch(source)
+        if actual in {"main", "master"}:
+            raise ToolSafetyError(f"Direct writes to protected branch {actual!r} are forbidden.")
+        if actual != expected_branch:
+            raise ToolSafetyError(
+                f"Agent write branch mismatch: expected {expected_branch!r}, current branch is {actual!r}."
+            )
 
     def claim_write(target: Path) -> str | None:
         relative = target.relative_to(source).as_posix()
@@ -178,7 +198,7 @@ def build_coding_tools(
 
     @tool("read_source_file")
     def read_source_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
-        """Read a UTF-8 source file inside burncloud/burncloud with line numbers. Max 500 lines per call. Missing paths are recoverable discovery results."""
+        """Read a UTF-8 source file inside the Agent BurnCloud worktree with line numbers. Max 500 lines per call. Missing paths are recoverable discovery results."""
         target = _safe_path(source, path, allow_missing=True)
         if not target.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -204,7 +224,7 @@ def build_coding_tools(
 
     @tool("list_source_directory")
     def list_source_directory(path: str = ".") -> str:
-        """List one directory inside the BurnCloud source repository; hidden Git internals are never exposed. Missing paths are recoverable discovery results."""
+        """List one directory inside the Agent BurnCloud worktree; hidden Git internals are never exposed. Missing paths are recoverable discovery results."""
         target = _safe_path(source, path, allow_missing=True)
         if not target.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -246,7 +266,7 @@ def build_coding_tools(
 
     @tool("git_diff")
     def git_diff() -> str:
-        """Show the current uncommitted BurnCloud source diff. Never stages, commits, pushes, or modifies Git."""
+        """Show the current uncommitted Agent-worktree diff. Never stages, commits, pushes, or modifies Git."""
         result = _run(source, ["git", "diff", "--no-ext-diff", "--unified=3", "--", "."], timeout=30)
         if result["returncode"] != 0:
             raise RuntimeError(str(result["output"]))
@@ -254,7 +274,7 @@ def build_coding_tools(
 
     @tool("git_worktree_status")
     def git_worktree_status() -> str:
-        """Show porcelain Git status for the BurnCloud source tree without changing Git state."""
+        """Show porcelain Git status for the Agent BurnCloud worktree without changing Git state."""
         return git_status(source) or "CLEAN"
 
     @tool("run_validation")
@@ -278,7 +298,8 @@ def build_coding_tools(
     if allow_write:
         @tool("replace_source_text")
         def replace_source_text(path: str, old: str, new: str, expected_occurrences: int = 1) -> str:
-            """Safely edit an existing BurnCloud source file by exact text replacement. Routine mismatches are returned to the Agent for recovery; security boundary violations still fail hard."""
+            """Safely edit an existing Agent-worktree source file by exact text replacement. Routine mismatches are recoverable; branch/security violations fail hard."""
+            assert_write_branch()
             if not old:
                 return "INVALID_ARGUMENT: old must not be empty"
             if expected_occurrences < 1 or expected_occurrences > 20:
@@ -303,7 +324,8 @@ def build_coding_tools(
 
         @tool("create_source_file")
         def create_source_file(path: str, content: str) -> str:
-            """Create a new UTF-8 file inside BurnCloud source. Existing paths are returned as a recoverable refusal; security boundary violations still fail hard."""
+            """Create a new UTF-8 file inside the Agent worktree. Existing paths are recoverable refusals; branch/security violations fail hard."""
+            assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             if target.exists():
                 return (
@@ -319,7 +341,8 @@ def build_coding_tools(
 
         @tool("format_source_file")
         def format_source_file(path: str) -> str:
-            """Format exactly one existing Rust source file with rustfmt. This tool can never format the whole crate or workspace."""
+            """Format exactly one existing Rust source file in the Agent worktree with rustfmt. Never formats the whole crate/workspace."""
+            assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             if not target.exists():
                 return _recoverable_path_error("NOT_FOUND", path)

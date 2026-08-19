@@ -1,8 +1,8 @@
-# BurnCloud UI Rebuild Graph v0.2
+# BurnCloud UI Rebuild Graph v0.3
 
 这是 BurnCloud UI 全量重建的可执行 LangGraph Harness。
 
-## v0.2 目标
+## v0.3 目标
 
 - 读取 `docs/ui/` 中已批准的 Product / IA / Page Contracts。
 - 检查当前 `burncloud/burncloud` 的 Route、Auth、Role 和 Server API 权限边界。
@@ -13,8 +13,37 @@
 - 自动生成并遍历 25 个目标页面任务，Golden Pages 优先。
 - live write 模式使用真实 `create_agent()` Builder / Reviewer / Fixer。
 - 每页执行 Builder → deterministic Verifier → independent Reviewer → bounded Fix Loop。
+- 每次 live write 自动从干净的 `burncloud/main` 创建独立 Agent branch + Git worktree；禁止直接写 main。
+- 默认模型是 `gpt-5.6-sol`，Studio/CLI 都可以省略模型名；需要时仍可显式覆盖。
 - 最后使用 LangGraph `interrupt()` 等待人工批准。
 - Release Agent 当前不会自动 commit、push 或 merge。
+
+## Git 隔离规则
+
+每次 write Run 自动创建：
+
+```text
+C:\Users\huang\Work\
+├── burncloud\                         # main，只做基线，不写
+├── burncloud-workbench\
+└── burncloud-worktrees\
+    └── ui-rebuild-<timestamp>-<id>\  # Agent 实际施工目录
+```
+
+对应分支：
+
+```text
+agent/ui-rebuild/<timestamp>-<id>
+```
+
+硬规则：
+
+- `burncloud` 主 checkout 必须位于 `main`。
+- `burncloud/main` 必须 clean，否则拒绝创建 Agent worktree。
+- Agent worktree 从 main 当前 HEAD commit 创建并记录 `base_commit`。
+- Builder/Fixer 的写工具会再次检查当前 branch 必须等于本 Run 的 `agent_branch`。
+- `main` / `master` 上的写操作会被工具层硬拒绝。
+- 不自动 stash、不自动 restore main、不自动删除用户已有修改。
 
 ## 路径硬规则
 
@@ -37,6 +66,7 @@ Builder
 ├── search/list
 ├── exact source text replacement
 ├── create new source file
+├── format one explicitly changed .rs file
 ├── git diff/status (read-only)
 └── allowlisted validation
 
@@ -47,10 +77,11 @@ Reviewer
 └── allowlisted validation
 
 Fixer
-├── same limited write tools as Builder
+├── same bounded write tools as Builder
 └── only fixes structured Reviewer findings
 
 No Agent can:
+- write main/master
 - access .git internals
 - delete source files
 - execute arbitrary shell commands
@@ -60,15 +91,19 @@ No Agent can:
 - publish
 ```
 
+每个 Builder/Fixer invocation 最多触碰 8 个不同文件。
+
 ## 本地运行
 
-建议两个仓库作为同级目录：
+基础目录：
 
 ```text
 C:\Users\huang\Work\
 ├── burncloud\
 └── burncloud-workbench\
 ```
+
+`burncloud-worktrees\` 会在第一次 live write 时自动创建。
 
 ### 1. 创建虚拟环境并安装
 
@@ -98,32 +133,25 @@ BASE_URL=http://127.0.0.1:8080/v1
 LANGSMITH_API_KEY=xxxxxxxx
 ```
 
-- `API_KEY`：Agent 模型端点使用的 Key。
-- `BASE_URL`：OpenAI-compatible 模型端点。
-- `LANGSMITH_API_KEY`：LangGraph Studio / LangSmith 使用的 Key。
+模型名不是 secret，不放 `.env`。默认：
 
-`model_factory.py` 统一读取这些变量。Agent 的模型名称由调用方传入，不增加第四个环境变量。
+```text
+gpt-5.6-sol
+```
 
 ### 3. 验证 create_agent + Tool Calling
 
-在允许 Builder 修改 BurnCloud 之前，先验证模型端点真的支持 Tool Calling：
+默认模型：
+
+```bat
+burncloud-ui-rebuild agent-check
+```
+
+临时覆盖模型：
 
 ```bat
 burncloud-ui-rebuild agent-check --model gpt-5.6-terra
 ```
-
-成功结果：
-
-```json
-{
-  "status": "PASS",
-  "model": "gpt-5.6-terra",
-  "tool_called": true,
-  "final_text": "AGENT_READY"
-}
-```
-
-这个检查不会读取或修改 `burncloud/burncloud`。
 
 ### 4. 运行单元测试
 
@@ -137,73 +165,84 @@ pytest
 langgraph dev
 ```
 
-Studio 的 Graph 在进入 `bootstrap` 后会自动解析同级 `burncloud` 和 `burncloud-workbench` 路径。
-
-第一次 live Studio Run 推荐输入：
+第一次 live Studio Run 现在只需要：
 
 ```json
 {
   "execution_mode": "write",
-  "model_name": "gpt-5.6-terra",
   "page_limit": 1
 }
 ```
 
-write preflight 会先检查 `burncloud` working tree 必须是 clean；否则在任何 Agent 写文件之前停止。
+`bootstrap` 会自动使用 `gpt-5.6-sol`；`prepare_worktree` 会自动创建 Agent branch/worktree。
 
-### 6. 第一次真实 Agent 开发（CLI）
-
-先确认源码没有未提交修改：
-
-```bat
-cd C:\Users\huang\Work\burncloud
-git status --short
-```
-
-输出必须为空。
-
-然后：
-
-```bat
-cd C:\Users\huang\Work\burncloud-workbench\graphs\ui-rebuild
-.venv\Scripts\activate.bat
-burncloud-ui-rebuild rebuild --model gpt-5.6-terra --limit 1 --write
-```
-
-`--limit 1` 对应第一张 Golden Page：`Buyer Overview`。
-
-流程：
+完整主流程：
 
 ```text
 bootstrap
 → spec_agent
 → repo_scout
 → permission_guardian
+→ prepare_worktree
 → write_preflight
 → architecture_agent
 → select_next_page
-→ Builder(create_agent + limited write tools)
+→ Builder(create_agent + bounded worktree-only write tools)
 → Verifier(cargo fmt/client check)
 → Reviewer(create_agent + read-only tools)
-→ FAIL: Fixer(create_agent + bounded write tools) → Verify → Review
+→ FAIL: Fixer(create_agent + bounded worktree-only write tools) → Verify → Review
 → PASS: mark_page_complete
 → final_permission_check
 → Human Gate
 ```
 
-到 Human Gate 时，源码修改已经留在本地 working tree，但还没有 commit/push/merge。检查：
+### 6. 第一次真实 Agent 开发（CLI）
+
+只需要确认主 checkout 是 clean main：
 
 ```bat
 cd C:\Users\huang\Work\burncloud
+git status
+```
+
+然后：
+
+```bat
+cd C:\Users\huang\Work\burncloud-workbench\graphs\ui-rebuild
+.venv\Scripts\activate.bat
+burncloud-ui-rebuild rebuild --limit 1 --write
+```
+
+默认使用 `gpt-5.6-sol`。
+
+命令输出和 Human Gate 会显示：
+
+```text
+agent_branch
+worktree_root
+base_commit
+changed_files
+validation_results
+```
+
+检查 Agent 修改时，应进入输出中的 `worktree_root`，不是 `C:\Users\huang\Work\burncloud`：
+
+```bat
+cd <worktree_root>
 git status --short
 git diff
 ```
 
-只有确认结果后才进入后续 Git Release 阶段。
+主 checkout 应继续保持：
+
+```bat
+cd C:\Users\huang\Work\burncloud
+git status --short
+```
+
+无输出。
 
 ### 7. 保留 dry-run
-
-完整 25 页流程仍可不调用真实写 Agent：
 
 ```bat
 burncloud-ui-rebuild dry-run

@@ -79,10 +79,12 @@ def test_plan_guard_accepts_small_client_only_plan():
     assert result["current_page_status"] == "plan_approved"
 
 
-def test_builder_tool_refuses_file_outside_approved_plan(tmp_path: Path):
+def test_builder_tool_refuses_edit_and_restore_outside_approved_plan(tmp_path: Path):
     repo = _agent_repo(tmp_path)
     workbench = tmp_path / "workbench"
     workbench.mkdir()
+    unrelated = repo / "crates/client/src/unrelated.rs"
+    unrelated.write_text("fn unrelated() { println!(\"dirty\"); }\n", encoding="utf-8")
     tools = {
         item.name: item
         for item in build_coding_tools(
@@ -91,6 +93,7 @@ def test_builder_tool_refuses_file_outside_approved_plan(tmp_path: Path):
             allow_write=True,
             expected_branch="agent/ui-rebuild/v1-test",
             allowed_write_files=["crates/client/src/app.rs"],
+            allowed_restore_files=["crates/client/src/app.rs"],
         )
     }
 
@@ -100,13 +103,16 @@ def test_builder_tool_refuses_file_outside_approved_plan(tmp_path: Path):
         "new": "fn client() { println!(\"ok\"); }",
         "expected_occurrences": 1,
     })
-    refused = tools["create_source_file"].invoke({"path": "crates/client/src/extra.rs", "content": "// extra\n"})
+    edit_refused = tools["create_source_file"].invoke({"path": "crates/client/src/extra.rs", "content": "// extra\n"})
+    restore_refused = tools["restore_source_file"].invoke({"path": "crates/client/src/unrelated.rs"})
     assert ok.startswith("UPDATED")
-    assert "PLAN_SCOPE_REFUSED" in refused
+    assert "PLAN_SCOPE_REFUSED" in edit_refused
+    assert "RESTORE_SCOPE_REFUSED" in restore_refused
     assert not (repo / "crates/client/src/extra.rs").exists()
+    assert "dirty" in unrelated.read_text(encoding="utf-8")
 
 
-def test_restore_scope_can_discard_dirty_unplanned_file_without_edit_permission(tmp_path: Path):
+def test_fixer_restore_scope_can_discard_dirty_unplanned_file_without_edit_permission(tmp_path: Path):
     repo = _agent_repo(tmp_path)
     workbench = tmp_path / "workbench"
     workbench.mkdir()

@@ -377,13 +377,22 @@ def reviewer(state: UIRebuildState) -> dict[str, Any]:
 
 
 def fixer(state: UIRebuildState) -> dict[str, Any]:
-    """Role 9 — Fixer: bounded correction only; no unrelated refactors."""
+    """Role 9 — Fixer: bounded correction only; escalate instead of crashing when exhausted."""
     current = state.get("fix_round", 0) + 1
     max_rounds = state.get("max_fix_rounds", 3)
     if current > max_rounds:
         page = state.get("current_page")
         page_id = page["id"] if page else "unknown"
-        raise RuntimeError(f"Fix loop exceeded max rounds ({max_rounds}) for {page_id}.")
+        warnings = list(state.get("warnings", []))
+        warnings.append(
+            f"Fix loop exhausted after {max_rounds} rounds for {page_id}; escalating to human review."
+        )
+        return {
+            "fix_round": max_rounds,
+            "current_page_status": "fix_exhausted",
+            "changed_files": changed_source_files(state["source_repo_root"]),
+            "warnings": warnings,
+        }
 
     if state.get("execution_mode", "dry_run") == "dry_run":
         return {
@@ -434,6 +443,19 @@ def final_permission_check(state: UIRebuildState) -> dict[str, Any]:
             code="INCOMPLETE_PAGE_QUEUE",
             message=f"Not all target pages completed: {missing}",
         ))
+    if state.get("current_page_status") in {"fix_exhausted", "fix_blocked", "builder_blocked"}:
+        page = state.get("current_page")
+        findings.append(Finding(
+            severity="blocker",
+            code="PAGE_REBUILD_BLOCKED",
+            message=(
+                f"Page rebuild stopped with status {state.get('current_page_status')}"
+                + (f" for {page['id']}" if page else "")
+                + "."
+            ),
+            evidence=f"fix_round={state.get('fix_round', 0)}",
+            expected="Resolve remaining verifier/reviewer findings before release.",
+        ))
     return {"final_findings": findings, "phase": "final_permission_checked"}
 
 
@@ -445,6 +467,10 @@ def human_gate(state: UIRebuildState) -> dict[str, Any]:
         "base_commit": state.get("base_commit", ""),
         "agent_branch": state.get("agent_branch", ""),
         "worktree_root": state.get("worktree_root", ""),
+        "current_page": state.get("current_page"),
+        "current_page_status": state.get("current_page_status", ""),
+        "fix_round": state.get("fix_round", 0),
+        "review_findings": state.get("review_findings", []),
         "completed_pages": len(state.get("completed_pages", [])),
         "total_pages": len(state.get("page_queue", TARGET_PAGES)),
         "changed_files": state.get("changed_files", []),
@@ -456,9 +482,17 @@ def human_gate(state: UIRebuildState) -> dict[str, Any]:
 
 
 def release_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Role 10 — Release Agent: release only approved work."""
+    """Role 10 — Release Agent: release only approved work with no blocking findings."""
     if not state.get("human_decision"):
         return {"release_status": "rejected", "phase": "done"}
+    blockers = [item for item in state.get("final_findings", []) if item.get("severity") == "blocker"]
+    if blockers:
+        return {
+            "release_status": "blocked_by_final_findings",
+            "agent_branch": state.get("agent_branch", ""),
+            "worktree_root": state.get("worktree_root", ""),
+            "phase": "done",
+        }
     if state.get("execution_mode", "dry_run") == "dry_run":
         return {"release_status": "dry_run_complete_no_git_write", "phase": "done"}
     return {

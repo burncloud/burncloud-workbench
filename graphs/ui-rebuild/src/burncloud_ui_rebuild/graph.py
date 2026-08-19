@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from burncloud_ui_rebuild.config import source_root, workbench_root
 from burncloud_ui_rebuild.nodes import (
     architecture_agent,
+    bootstrap,
     final_permission_check,
     human_gate,
     mark_page_complete,
@@ -33,6 +34,7 @@ def build_graph(checkpointer=None):
 
     # Role 1 — Orchestrator is the parent graph itself. It schedules work but
     # does not invent product or permission decisions.
+    builder.add_node("bootstrap", bootstrap)
     builder.add_node("spec_agent", spec_agent)
     builder.add_node("repo_scout", repo_scout)
     builder.add_node("permission_guardian", permission_guardian)
@@ -45,7 +47,8 @@ def build_graph(checkpointer=None):
     builder.add_node("human_gate", human_gate)
     builder.add_node("release", release_agent)
 
-    builder.add_edge(START, "spec_agent")
+    builder.add_edge(START, "bootstrap")
+    builder.add_edge("bootstrap", "spec_agent")
     builder.add_edge("spec_agent", "repo_scout")
     builder.add_edge("repo_scout", "permission_guardian")
     builder.add_edge("permission_guardian", "write_preflight")

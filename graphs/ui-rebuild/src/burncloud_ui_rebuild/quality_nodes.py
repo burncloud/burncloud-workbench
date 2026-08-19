@@ -1,18 +1,60 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .agents import run_fixer_agent
 from .coding_tools import changed_source_files, create_page_checkpoint, run_named_validation
 from .nodes import reviewer as base_reviewer
-from .nodes import verifier as base_verifier
 from .policy import DEFAULT_POLICY, blocking_findings
 from .state import Finding, UIRebuildState
 
 
 def code_verifier(state: UIRebuildState) -> dict[str, Any]:
-    """Deterministic code-level gate: contract presence, route namespace, fmt and compile."""
-    return base_verifier(state)
+    """Deterministic code-level gate owned entirely by HarnessPolicy."""
+    page = state.get("current_page")
+    findings: list[Finding] = []
+    results: list[dict[str, Any]] = []
+    if page is None:
+        return {"verification_findings": findings, "validation_results": results}
+
+    if not (page["route"] == "/console" or page["route"].startswith("/console/")):
+        findings.append(Finding(
+            severity="blocker",
+            code="CONSOLE_NAMESPACE",
+            message="Management page escaped /console namespace.",
+            evidence=page["route"],
+            expected="/console/*",
+        ))
+
+    contract = Path(state["workbench_root"]) / page["contract_path"]
+    if not contract.exists():
+        findings.append(Finding(
+            severity="blocker",
+            code="MISSING_PAGE_CONTRACT",
+            message=f'Missing page contract for {page["id"]}.',
+            expected=page["contract_path"],
+        ))
+
+    if state.get("execution_mode", "dry_run") == "write":
+        for name in DEFAULT_POLICY.code_validations:
+            result = run_named_validation(state["source_repo_root"], name)
+            results.append(result)
+            if result["returncode"] != 0:
+                findings.append(Finding(
+                    severity="blocker",
+                    code=f"VALIDATION_{name.upper()}",
+                    message=f"Code validation failed: {name}",
+                    evidence=str(result["output"]),
+                    expected="returncode 0",
+                ))
+
+    return {
+        "verification_findings": findings,
+        "validation_results": results,
+        "changed_files": changed_source_files(state["source_repo_root"]),
+        "current_page_status": "code_verified" if not blocking_findings(findings) else "verification_failed",
+    }
 
 
 def reality_anchor(state: UIRebuildState) -> dict[str, Any]:

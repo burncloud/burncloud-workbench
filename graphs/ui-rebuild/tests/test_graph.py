@@ -75,12 +75,27 @@ def test_only_major_and_blocker_findings_trigger_repair():
     assert _after_review({"review_findings": blocker}) == "修复"
 
 
-def test_scope_and_deterministic_quality_failures_route_to_fixer():
+def test_scope_unplanned_files_replan_before_spending_fixer_rounds():
+    unplanned = [{
+        "severity": "blocker",
+        "code": "SCOPE_GUARD_UNPLANNED_FILES",
+        "message": "dashboard.rs is outside the approved plan",
+    }]
+    assert _after_scope_guard({"verification_findings": unplanned, "plan_round": 1}) == "重新规划"
+    assert _after_scope_guard({
+        "verification_findings": unplanned,
+        "plan_round": DEFAULT_POLICY.max_plan_rounds,
+    }) == "修复"
+
+
+def test_other_scope_and_deterministic_quality_failures_route_to_fixer():
     blocker = [{"severity": "blocker", "code": "CHECK", "message": "failed"}]
-    assert _after_scope_guard({"verification_findings": blocker}) == "修复"
+    stale = [{"severity": "blocker", "code": "SCOPE_GUARD_PREEXISTING_DIRTY", "message": "retry carry-over"}]
+    assert _after_scope_guard({"verification_findings": blocker, "plan_round": 1}) == "修复"
+    assert _after_scope_guard({"verification_findings": stale, "plan_round": 1}) == "修复"
     assert _after_code_verification({"verification_findings": blocker}) == "修复"
     assert _after_reality_anchor({"verification_findings": blocker}) == "修复"
-    assert _after_scope_guard({"verification_findings": []}) == "代码验证"
+    assert _after_scope_guard({"verification_findings": [], "plan_round": 1}) == "代码验证"
     assert _after_code_verification({"verification_findings": []}) == "现实验证"
     assert _after_reality_anchor({"verification_findings": []}) == "审查"
 

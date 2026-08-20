@@ -3,6 +3,7 @@ from langgraph.types import Command
 
 from burncloud_ui_rebuild.graph import (
     _after_page_rebuild,
+    _branch_router,
     build_graph,
     default_execution_mode,
     initial_state,
@@ -35,6 +36,13 @@ def test_explicit_dry_run_and_page_limit_are_preserved():
     defaults = default_execution_mode({"execution_mode": "dry_run", "page_limit": 7})
     assert defaults["execution_mode"] == "dry_run"
     assert defaults["page_limit"] == 7
+
+
+def test_completed_unintegrated_branch_routes_directly_to_pr_release():
+    assert _branch_router({"branch_task_status": "completed_unintegrated"}) == "提交PR"
+    assert _branch_router({"branch_task_status": "awaiting_pr_merge"}) == "提交PR"
+    assert _branch_router({"branch_task_status": "active"}) == "继续工程"
+    assert _branch_router({}) == "继续工程"
 
 
 def test_v1_scout_plan_builder_routing():

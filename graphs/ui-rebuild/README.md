@@ -40,7 +40,7 @@ Buyer / Supplier / Admin 是独立 Workspace Role；普通账号可以同时拥�
 → 读取规范
 → 仓库侦察
 → 权限守卫
-→ 创建开发分支 / 复用 worktree
+→ 准备开发分支
 → 写入预检
 → 运行上下文
 → 恢复通知（仅需要恢复审批时）
@@ -125,7 +125,7 @@ write files / Agent               8
 plan files                         8
 page wall-clock budget            2400s
 run wall-clock budget             7200s
-page token budget                 350000
+page token budget                 1000000
 run token budget                  1000000
 Agent invocations / page          12
 
@@ -140,7 +140,9 @@ advisory review levels            minor, info
 page writable domain              crates/client/*
 ```
 
-如果上游兼容接口没有返回 token usage metadata，Harness 不会伪造 Token/Cost；Invocation 数和局部 model/tool call 预算仍然有效。
+默认 `{}` 只处理 1 页，因此一页可以使用完整的 100 万 Token Graph 预算。如果以后一次运行多页，100 万是整个 Graph Run 的总预算。
+
+如果上游兼容接口没有返回 token usage metadata，Harness 不会伪造 Token/Cost；Invocation 数、model/tool call 限制和 wall-clock 预算仍然有效。
 
 ## Plan 是真正权限，不是建议
 
@@ -197,9 +199,11 @@ LangGraph 顶层仍保持兼容的 `UIRebuildState`，但 v1 已明确分出：
 
 ```text
 RunContext
-├ run_id
-├ branch / worktree
-├ base commit
+├ run id
+├ base branch / commit
+├ agent branch
+├ source repo root
+├ branch reused
 ├ model
 └ page limit
 
@@ -228,31 +232,95 @@ Agent 节点只接收完成自身职责所需的最小 Context，不把整个历
 
 Studio 使用 `{}` 新建运行时，如果没有显式提供 `thread_id`，Harness 会生成唯一 Run ID，避免不同运行的 Telegram 去重键互相碰撞。
 
-## Git 隔离
+## Git Branch 生命周期：单 checkout，不创建 worktree
 
-主 checkout：
+Harness 现在只使用一个 BurnCloud checkout：
 
 ```text
 C:\Users\huang\Work\burncloud
-└ main    # 只做稳定基线，必须 clean
+├ target/                         # 始终留在同一个目录，复用 Cargo 增量编译缓存
+└ 当前 Git branch
+   ├ main                         # 新任务基线
+   └ agent/ui-rebuild/...         # Agent 施工分支
 ```
 
-Agent 施工：
+**新版本不会调用 `git worktree add`。** `target/` 属于被 Git 忽略的构建目录，切换 branch 时不会被删除，因此失败重试、重新启动 LangGraph、以及后续新 Agent branch 都可以继续复用同一个 `target/` 缓存。代码变化、feature/profile/依赖变化仍可能导致 Cargo 对受影响部分重新编译，这是正常增量编译行为。
+
+分支生命周期由 Harness 确定性控制：
 
 ```text
-C:\Users\huang\Work\burncloud-worktrees\ui-rebuild-...
-└ agent/ui-rebuild/...
+main + clean
+→ 创建 agent/ui-rebuild/<id>
+→ ACTIVE
+
+ACTIVE / BLOCKED / ERROR
+→ 不创建新 branch
+→ 不回 main
+→ 重启 LangGraph / 新 Studio Thread / 503 后重跑
+→ 继续当前 agent/ui-rebuild/<id>
+→ 保留 dirty diff + target cache
+
+SUCCESS + Human Gate 通过
+→ 当前 Agent branch 标记 completed
+→ 当前 Run 结束时不切 branch
+
+下一次新 Graph Run
+→ 发现当前 branch 已 completed 且 clean
+→ git switch main
+→ 从当前本地 main 创建新的 agent/ui-rebuild/<new-id>
+→ target cache 仍在同一 checkout 中
 ```
 
-第一次 write Run 创建 Agent branch + worktree；后续 Run 自动复用最新可用 UI rebuild worktree。
+另外支持显式新任务：
 
-Builder/Fixer Tool 会再次验证：
+```json
+{
+  "start_new_task": true
+}
+```
+
+或 CLI：
+
+```bat
+burncloud-ui-rebuild rebuild --write --new-task
+```
+
+如果当前 Agent branch 还有未提交修改，显式新任务会直接拒绝，防止把失败现场丢掉。要继续修就直接重新运行 Graph；要真正放弃则先由人明确清理/恢复当前 Agent branch。
+
+Builder/Fixer Tool 每次写入都会重新验证：
 
 ```text
 current branch == expected agent_branch
 ```
 
 `main/master` 写操作硬拒绝。
+
+### 从旧 worktree 版本迁移一次
+
+如果本机还存在旧的：
+
+```text
+C:\Users\huang\Work\burncloud-worktrees\ui-rebuild-...
+```
+
+新 Harness 不会偷偷忽略旧失败现场再开 branch，而会要求先迁移一次：
+
+```bat
+burncloud-ui-rebuild migrate-legacy-worktree --confirm
+```
+
+迁移逻辑：
+
+```text
+旧 Agent worktree 有 dirty 修改
+→ 临时 stash tracked + untracked
+→ remove 旧 linked worktree
+→ C:\Users\huang\Work\burncloud 切到原 Agent branch
+→ stash pop 恢复原修改
+→ 从此所有修复都在主 checkout 的原 branch 上继续
+```
+
+旧 worktree 中的 ignored `target/` 不迁移，因为目标就是从此统一使用主 checkout 的 `C:\Users\huang\Work\burncloud\target` 缓存。
 
 ## 页面 Git Checkpoint
 
@@ -275,7 +343,7 @@ LLM Agent 本身没有 commit / push / merge 权限。
 
 ## Recovery
 
-查看当前 Agent 分支已有页面锚点：
+查看当前 Agent branch 已有页面锚点：
 
 ```bat
 burncloud-ui-rebuild checkpoints
@@ -289,7 +357,7 @@ burncloud-ui-rebuild recover --commit <SHA> --confirm
 
 Recovery 规则：
 
-- 只允许 `agent/ui-rebuild/*`。
+- 只允许当前 `agent/ui-rebuild/*` branch。
 - 目标必须是 Harness 产生的 `agent(ui): checkpoint ...` commit。
 - 目标必须是当前 HEAD 的 ancestor。
 - 使用 `git reset --hard <checkpoint>` 恢复 tracked 文件。
@@ -353,14 +421,6 @@ gpt-5.6-sol
 burncloud-ui-rebuild telegram-check
 ```
 
-成功输出：
-
-```text
-status = sent
-```
-
-同时 Telegram 会收到一条测试消息。
-
 ## 本地更新
 
 ```bat
@@ -375,9 +435,13 @@ pytest
 
 ## LangGraph Studio
 
+推荐通过 Telegram-aware Supervisor 启动：
+
 ```bat
-langgraph dev
+burncloud-ui-rebuild studio
 ```
+
+它内部运行 `langgraph dev`，并额外覆盖 Graph import / Agent Server 启动阶段的异常通知。
 
 默认 Input：
 
@@ -391,16 +455,23 @@ langgraph dev
 {
   "execution_mode": "write",
   "model_name": "gpt-5.6-sol",
-  "page_limit": 1
+  "page_limit": 1,
+  "start_new_task": false
 }
 ```
 
 ## CLI
 
-真实一页：
+继续当前任务（失败/重试默认就是这个）：
 
 ```bat
 burncloud-ui-rebuild rebuild --write --limit 1
+```
+
+明确新任务：
+
+```bat
+burncloud-ui-rebuild rebuild --write --limit 1 --new-task
 ```
 
 Dry run：
@@ -426,8 +497,9 @@ burncloud-ui-rebuild telegram-check
 当前 Harness 会：
 
 ```text
-创建/复用 Agent branch
-修改 Agent worktree
+创建/续用 Agent branch（单 checkout）
+复用同一个 Cargo target/
+修改当前 Agent branch
 确定性验证
 本地 page checkpoint commit
 Human Gate

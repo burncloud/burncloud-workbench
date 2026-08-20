@@ -57,7 +57,8 @@ class RunContext(TypedDict, total=False):
     base_branch: str
     base_commit: str
     agent_branch: str
-    worktree_root: str
+    source_repo_root: str
+    branch_reused: bool
     model_name: str
     page_limit: int
 
@@ -96,16 +97,22 @@ class UIRebuildState(TypedDict, total=False):
     execution_mode: ExecutionMode
     model_name: str
     page_limit: int
+    start_new_task: bool
 
     base_repo_root: str
     base_branch: str
     base_commit: str
     agent_branch: str
-    worktree_root: str
-    worktree_reused: bool
     source_repo_root: str
+    branch_reused: bool
+    branch_task_status: str
     workbench_root: str
     max_fix_rounds: int
+
+    # Temporary compatibility fields for old persisted Studio threads. New runs
+    # never create a Git worktree; worktree_root, if present, equals source_repo_root.
+    worktree_root: str
+    worktree_reused: bool
 
     # Layered Graph Engineering state.
     run_context: RunContext

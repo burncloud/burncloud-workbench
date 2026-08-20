@@ -36,8 +36,9 @@ def _repo(tmp_path: Path) -> Path:
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "agent-test@example.com")
     _git(repo, "config", "user.name", "Agent Test")
+    (repo / ".gitignore").write_text("target/\n", encoding="utf-8")
     (repo / "README.md").write_text("baseline\n", encoding="utf-8")
-    _git(repo, "add", "README.md")
+    _git(repo, "add", ".gitignore", "README.md")
     _git(repo, "commit", "-m", "baseline")
     return repo
 
@@ -57,6 +58,33 @@ def test_prepare_agent_branch_uses_same_checkout(tmp_path: Path):
     assert head_commit(repo) == baseline
     assert result["base_commit"] == baseline
     assert porcelain_status(repo) == ""
+    # The Harness must not create a second checkout/worktree.
+    assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_single_checkout_keeps_target_cache_across_branch_lifecycle(tmp_path: Path):
+    repo = _repo(tmp_path)
+    cache = repo / "target/debug/incremental/cache-marker"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("warm-cache\n", encoding="utf-8")
+
+    first = prepare_agent_worktree(repo)
+    first_branch = first["agent_branch"]
+    assert cache.read_text(encoding="utf-8") == "warm-cache\n"
+
+    # A failed/retried run stays on the same branch and same target directory.
+    second = prepare_agent_worktree(repo)
+    assert second["agent_branch"] == first_branch
+    assert second["branch_reused"] is True
+    assert cache.read_text(encoding="utf-8") == "warm-cache\n"
+
+    # A completed task creates the next task branch from main, still in the same
+    # checkout, so ignored Cargo build artifacts remain available for reuse.
+    mark_agent_branch_completed(repo)
+    third = prepare_agent_worktree(repo)
+    assert third["agent_branch"] != first_branch
+    assert cache.read_text(encoding="utf-8") == "warm-cache\n"
+    assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
 def test_failed_or_in_progress_run_reuses_current_agent_branch_and_dirty_state(tmp_path: Path):

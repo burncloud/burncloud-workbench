@@ -71,6 +71,7 @@ class PageContext(TypedDict, total=False):
     started_at: float
     baseline_commit: str
     baseline_dirty_files: list[str]
+    baseline_dirty_fingerprints: dict[str, str]
     scout_report: dict[str, Any]
     implementation_plan: dict[str, Any]
     plan_round: int
@@ -146,6 +147,8 @@ class UIRebuildState(TypedDict, total=False):
     review_summary: str
 
     changed_files: list[str]
+    page_changed_files: list[str]
+    page_checkpoint_files: list[str]
     validation_results: list[dict[str, Any]]
     reality_report: dict[str, Any]
     verification_findings: list[Finding]

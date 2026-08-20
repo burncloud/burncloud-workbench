@@ -5,7 +5,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import workbench_root as default_workbench_root
 from .policy import DEFAULT_POLICY
@@ -41,10 +41,7 @@ def _compact(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_compact(item, depth=depth + 1) for item in value[:_MAX_LIST]]
     if isinstance(value, dict):
-        return {
-            str(key): _compact(item, depth=depth + 1)
-            for key, item in list(value.items())[:_MAX_LIST]
-        }
+        return {str(key): _compact(item, depth=depth + 1) for key, item in list(value.items())[:_MAX_LIST]}
     return _compact(str(value), depth=depth + 1)
 
 
@@ -76,10 +73,6 @@ def _resume_stage(snapshot: dict[str, Any]) -> str:
 
 
 def build_task_snapshot(state: UIRebuildState, *, safe_node: str) -> dict[str, Any]:
-    page_context = dict(state.get("page_context", {}))
-    # Fingerprints are useful for Git safety but can be rebuilt on a fresh page.
-    # Keep the current retry baseline because a continuation run must distinguish
-    # carry-over from new edits without replaying the old Agent transcript.
     payload = {
         "schema_version": TASK_SCHEMA_VERSION,
         "updated_at": time.time(),
@@ -90,7 +83,7 @@ def build_task_snapshot(state: UIRebuildState, *, safe_node: str) -> dict[str, A
         "current_page": state.get("current_page"),
         "current_page_status": state.get("current_page_status", ""),
         "completed_pages": list(state.get("completed_pages", [])),
-        "page_context": page_context,
+        "page_context": dict(state.get("page_context", {})),
         "scout_report": state.get("scout_report", {}),
         "implementation_plan": state.get("implementation_plan", {}),
         "plan_findings": list(state.get("plan_findings", [])),
@@ -113,12 +106,28 @@ def build_task_snapshot(state: UIRebuildState, *, safe_node: str) -> dict[str, A
     return _compact(payload)
 
 
+def _checkpoint_ready(state: UIRebuildState) -> bool:
+    """Prevent startup/preflight nodes from overwriting an existing Task file.
+
+    Before Restore Task State runs, a new Graph invocation has no page context and
+    must be read-only with respect to the persisted task. Once a page exists or a
+    task snapshot has already been restored/saved in this invocation, safe-node
+    checkpointing may proceed.
+    """
+    if state.get("current_page"):
+        return True
+    marker = state.get("task_snapshot", {}) or {}
+    return str(marker.get("status", "")) in {"restored", "saved"}
+
+
 def save_task_snapshot(state: UIRebuildState, *, safe_node: str) -> dict[str, Any]:
     if state.get("execution_mode", "dry_run") != "write":
         return {"status": "skipped_dry_run"}
     branch = str(state.get("agent_branch", "")).strip()
     if not branch.startswith("agent/ui-rebuild/"):
         return {"status": "skipped_no_agent_branch"}
+    if not _checkpoint_ready(state):
+        return {"status": "skipped_before_task_restore"}
 
     path = task_path(branch, state.get("workbench_root"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,12 +135,7 @@ def save_task_snapshot(state: UIRebuildState, *, safe_node: str) -> dict[str, An
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
-    return {
-        "status": "saved",
-        "path": str(path),
-        "safe_node": safe_node,
-        "task_total_tokens": snapshot["task_total_tokens"],
-    }
+    return {"status": "saved", "path": str(path), "safe_node": safe_node, "task_total_tokens": snapshot["task_total_tokens"]}
 
 
 def load_task_snapshot(branch: str, workbench_root: str | Path | None = None) -> dict[str, Any] | None:
@@ -162,7 +166,6 @@ def restore_task_snapshot_node(state: UIRebuildState) -> dict[str, Any]:
 
     prior_total = int(snapshot.get("task_total_tokens", 0) or 0)
     continuation_runs = int(snapshot.get("continuation_runs", 0) or 0) + 1
-    resume_stage = _resume_stage(snapshot)
     update: dict[str, Any] = {
         "task_snapshot": {
             "status": "restored",
@@ -172,8 +175,7 @@ def restore_task_snapshot_node(state: UIRebuildState) -> dict[str, Any]:
         "task_tokens_before_run": prior_total,
         "task_total_tokens": prior_total,
         "continuation_runs": continuation_runs,
-        "resume_page_stage": resume_stage,
-        # Run-local accounting must start fresh. Task accounting is retained above.
+        "resume_page_stage": _resume_stage(snapshot),
         "budget_usage": {},
         "invocation_history": [],
         "completed_pages": list(snapshot.get("completed_pages", state.get("completed_pages", []))),
@@ -216,21 +218,3 @@ def continuation_checkpoint_node(state: UIRebuildState) -> dict[str, Any]:
     result = save_task_snapshot(merged, safe_node="自动续跑")
     update["task_snapshot"] = result
     return update
-
-
-def task_checkpointing_node(name: str, node: Callable[[UIRebuildState], dict[str, Any]]):
-    """Persist a compact task snapshot after one successfully completed page node."""
-
-    def wrapped(state: UIRebuildState) -> dict[str, Any]:
-        update = node(state)
-        merged = dict(state)
-        merged.update(update)
-        result = save_task_snapshot(merged, safe_node=name)
-        if result.get("status") == "saved":
-            update = dict(update)
-            update["task_snapshot"] = result
-            update["task_total_tokens"] = int(result.get("task_total_tokens", 0) or 0)
-        return update
-
-    wrapped.__name__ = getattr(node, "__name__", "task_checkpointing_node")
-    return wrapped

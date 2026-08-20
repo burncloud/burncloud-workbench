@@ -33,7 +33,11 @@ class HarnessPolicy:
     max_run_tokens: int = 5_000_000
     max_agent_invocations_per_page: int = 12
 
+    # Creative edits stay tightly bounded by the approved page plan. Restore is a
+    # different operation: it can only discard paths that the Graph explicitly
+    # places in allowed_restore_files, so retry cleanup gets its own larger ceiling.
     max_write_files_per_agent: int = 8
+    max_restore_files_per_agent: int = 128
     max_plan_files: int = 8
     max_tool_output_chars: int = 40_000
     max_read_lines: int = 500

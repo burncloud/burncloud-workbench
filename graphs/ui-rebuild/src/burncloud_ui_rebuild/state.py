@@ -160,6 +160,7 @@ class UIRebuildState(TypedDict, total=False):
 
     final_findings: list[Finding]
     human_decision: bool
+    release_preflight: dict[str, Any]
     release_status: str
     pull_request_number: int
     pull_request_url: str

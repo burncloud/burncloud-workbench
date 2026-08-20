@@ -264,12 +264,17 @@ SUCCESS + Human Gate 通过
 → 当前 Agent branch 标记 completed
 → 当前 Run 结束时不切 branch
 
-下一次新 Graph Run
-→ 发现当前 branch 已 completed 且 clean
-→ git switch main
+completed 但尚未被 main 包含
+→ 继续保留当前 Agent branch
+→ 不自动从 main 新开，避免丢掉尚未合并的成果
+
+completed 且 main 已经包含该 branch 的全部 commit
+→ 下一次 Graph Run 才自动 git switch main
 → 从当前本地 main 创建新的 agent/ui-rebuild/<new-id>
 → target cache 仍在同一 checkout 中
 ```
+
+这意味着“成功”与“已进入 main”是两个不同状态。当前 v1 Release 只创建本地 checkpoint 和 Human Gate，不会自动 push/merge，因此在真正合入 main 之前，Harness 不会自动抛弃成功 branch。
 
 另外支持显式新任务：
 
@@ -297,7 +302,7 @@ current branch == expected agent_branch
 
 ### 从旧 worktree 版本迁移一次
 
-如果本机还存在旧的：
+如果本机还存在多个旧的：
 
 ```text
 C:\Users\huang\Work\burncloud-worktrees\ui-rebuild-...
@@ -309,18 +314,25 @@ C:\Users\huang\Work\burncloud-worktrees\ui-rebuild-...
 burncloud-ui-rebuild migrate-legacy-worktree --confirm
 ```
 
-迁移逻辑：
+一次迁移会处理全部旧 linked worktree：
 
 ```text
-旧 Agent worktree 有 dirty 修改
-→ 临时 stash tracked + untracked
-→ remove 旧 linked worktree
-→ C:\Users\huang\Work\burncloud 切到原 Agent branch
-→ stash pop 恢复原修改
-→ 从此所有修复都在主 checkout 的原 branch 上继续
+最新旧 Agent worktree
+→ stash tracked + untracked（若 dirty）
+→ 删除 linked worktree
+→ 主 C:\Users\huang\Work\burncloud 切到同一个 Agent branch
+→ stash pop 恢复当前失败现场
+
+更旧的 Agent worktree
+→ dirty 内容先转成 Git stash 留档
+→ 删除 linked worktree
+→ 不混入当前任务
+
+最终
+→ git worktree list 只剩 C:\Users\huang\Work\burncloud
 ```
 
-旧 worktree 中的 ignored `target/` 不迁移，因为目标就是从此统一使用主 checkout 的 `C:\Users\huang\Work\burncloud\target` 缓存。
+旧 worktree 中被忽略的 `target/` 不迁移；源码变化先安全 stash 后，旧目录使用 `git worktree remove --force` 退场。目标就是从此统一使用主 checkout 的 `C:\Users\huang\Work\burncloud\target` 缓存。
 
 ## 页面 Git Checkpoint
 

@@ -13,7 +13,7 @@ from .engineering_nodes import (
 from .notifications import error_notifying_node
 from .policy import DEFAULT_POLICY, blocking_findings
 from .quality_nodes import code_verifier, policy_fixer, policy_reviewer, reality_anchor
-from .state import UIRebuildState
+from .state import Finding, UIRebuildState
 
 
 PAGE_NODE_CONTEXT = "页面上下文"
@@ -28,6 +28,7 @@ PAGE_NODE_REVIEWER = "独立审查"
 PAGE_NODE_CAPTURE_FIX = "保存失败上下文"
 PAGE_NODE_FIXER = "修复"
 PAGE_NODE_FINALIZE_FIX = "整理修复结果"
+PAGE_NODE_PREPARE_REPLAN = "准备重新规划"
 
 
 def _after_scout(state: UIRebuildState) -> str:
@@ -112,9 +113,61 @@ def _finalize_fix(state: UIRebuildState) -> dict[str, object]:
 
 
 def _after_fix(state: UIRebuildState) -> str:
-    if state.get("current_page_status") in {"fix_exhausted", "fix_blocked", "budget_exhausted"}:
+    status = state.get("current_page_status")
+    if status in {"fix_exhausted", "budget_exhausted"}:
+        return "人工介入"
+    if status == "fix_blocked":
+        if int(state.get("plan_round", 0)) < DEFAULT_POLICY.max_plan_rounds:
+            return "重新规划"
         return "人工介入"
     return "重新检查范围"
+
+
+def _prepare_replan(state: UIRebuildState) -> dict[str, object]:
+    """Turn unresolved quality blockers into deterministic Planner feedback.
+
+    Fixer never gains permission to expand its own file scope. If it cannot solve
+    a blocker inside the approved plan, the graph gives Planner one bounded chance
+    to revise the plan. Old quality findings are preserved in last_* fields but
+    cleared from the active validation state so they do not poison the new plan.
+    """
+    verification = list(state.get("verification_findings") or state.get("last_verification_findings", []))
+    review = list(state.get("review_findings") or state.get("last_review_findings", []))
+    blockers = [*blocking_findings(verification), *blocking_findings(review)]
+
+    plan_findings: list[Finding] = []
+    for item in blockers:
+        code = str(item.get("code", "UNKNOWN"))
+        message = str(item.get("message", ""))
+        evidence = str(item.get("evidence", ""))
+        expected = str(item.get("expected", ""))
+        plan_findings.append(Finding(
+            severity="major",
+            code=f"REPLAN_{code}",
+            message=(
+                "Previous approved plan could not resolve this blocking quality finding. "
+                f"Revise the smallest client-side plan needed to address {code}: {message}"
+            ),
+            evidence=evidence,
+            expected=expected or "Expand or revise allowed_files only when required by evidence; keep the plan bounded.",
+        ))
+
+    if not plan_findings:
+        plan_findings.append(Finding(
+            severity="major",
+            code="REPLAN_FIXER_BLOCKED",
+            message="Fixer returned BLOCKED inside the current approved plan; Planner must revise the bounded implementation plan.",
+            evidence=str(state.get("fixer_report", {}).get("summary", "")),
+            expected="Produce a revised client-only plan or explicitly report an unresolvable backend/product gap.",
+        ))
+
+    return {
+        "plan_findings": plan_findings,
+        "verification_findings": [],
+        "review_findings": [],
+        "current_page_status": "replan_requested",
+        "last_failure_reason": state.get("last_failure_reason", ""),
+    }
 
 
 def _add_safe_node(builder: StateGraph, name: str, node) -> None:
@@ -135,6 +188,7 @@ def build_page_graph():
     _add_safe_node(builder, PAGE_NODE_CAPTURE_FIX, _capture_fix_context)
     _add_safe_node(builder, PAGE_NODE_FIXER, policy_fixer)
     _add_safe_node(builder, PAGE_NODE_FINALIZE_FIX, _finalize_fix)
+    _add_safe_node(builder, PAGE_NODE_PREPARE_REPLAN, _prepare_replan)
 
     builder.add_edge(START, PAGE_NODE_CONTEXT)
     builder.add_edge(PAGE_NODE_CONTEXT, PAGE_NODE_SCOUT)
@@ -183,6 +237,11 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_FINALIZE_FIX,
         _after_fix,
-        {"重新检查范围": PAGE_NODE_SCOPE_GUARD, "人工介入": END},
+        {
+            "重新检查范围": PAGE_NODE_SCOPE_GUARD,
+            "重新规划": PAGE_NODE_PREPARE_REPLAN,
+            "人工介入": END,
+        },
     )
+    builder.add_edge(PAGE_NODE_PREPARE_REPLAN, PAGE_NODE_PLANNER)
     return builder.compile()

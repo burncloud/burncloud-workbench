@@ -203,7 +203,9 @@ def migrate_legacy_agent_worktree(base_repo_root: str | Path) -> dict[str, Any]:
         legacy_root = Path(legacy["legacy_worktree_root"]).resolve()
         branch = _validate_branch_name(legacy["agent_branch"])
         stash = _stash_legacy_worktree(legacy_root, branch)
-        _git(root, "worktree", "remove", str(legacy_root), timeout=180)
+        # Source changes are already stashed. --force is only needed to let Git
+        # remove ignored build artifacts such as target/ from the retired checkout.
+        _git(root, "worktree", "remove", "--force", str(legacy_root), timeout=180)
         archived.append({
             "agent_branch": branch,
             "legacy_worktree_root": str(legacy_root),
@@ -214,7 +216,7 @@ def migrate_legacy_agent_worktree(base_repo_root: str | Path) -> dict[str, Any]:
     active_root = Path(active["legacy_worktree_root"]).resolve()
     active_branch = _validate_branch_name(active["agent_branch"])
     active_stash = _stash_legacy_worktree(active_root, active_branch)
-    _git(root, "worktree", "remove", str(active_root), timeout=180)
+    _git(root, "worktree", "remove", "--force", str(active_root), timeout=180)
     _git(root, "switch", active_branch, timeout=120)
     _clear_completed_branch(root)
 

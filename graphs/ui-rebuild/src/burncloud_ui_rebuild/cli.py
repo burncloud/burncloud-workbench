@@ -40,6 +40,10 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "agent_branch": result.get("agent_branch", ""),
             "source_repo_root": result.get("source_repo_root", ""),
             "branch_task_status": result.get("branch_task_status", ""),
+            "pull_request_number": result.get("pull_request_number", 0),
+            "pull_request_url": result.get("pull_request_url", ""),
+            "pull_request_title": result.get("pull_request_title", ""),
+            "pull_request_status": result.get("pull_request_status", ""),
             "completed_pages": len(result.get("completed_pages", [])),
             "current_page_status": result.get("current_page_status", ""),
             "budget_usage": result.get("budget_usage", {}),
@@ -75,7 +79,7 @@ def main() -> None:
     sub.add_parser("telegram-check", help="Send one Telegram test notification using local environment secrets.")
     sub.add_parser("studio", help="Run langgraph dev under the Telegram-aware Studio supervisor.")
 
-    migrate = sub.add_parser("migrate-legacy-worktree", help="Move the previous Agent branch/worktree back into the primary BurnCloud checkout once.")
+    migrate = sub.add_parser("migrate-legacy-worktree", help="Move previous Agent worktrees back into the primary BurnCloud checkout once.")
     migrate.add_argument("--confirm", action="store_true", help="Required because dirty legacy changes may be temporarily stashed and restored.")
 
     rebuild = sub.add_parser("rebuild", help="Run the real v1 Scout→Plan→Build→Verify→Review graph.")
@@ -84,7 +88,7 @@ def main() -> None:
     rebuild.add_argument("--thread-id", default="burncloud-graph-engineering-v1-live")
     rebuild.add_argument("--write", action="store_true", help="Acknowledge writes to the current Agent branch.")
     rebuild.add_argument("--new-task", action="store_true", help="Start a fresh Agent branch from main. Dirty active branches are never abandoned automatically.")
-    rebuild.add_argument("--approve", action="store_true", help="Resume the final Human Gate.")
+    rebuild.add_argument("--approve", action="store_true", help="Resume the final Human Gate; successful completion then pushes the Agent branch and creates/reuses one Draft PR.")
 
     sub.add_parser("checkpoints", help="List page checkpoint commits on the current Agent branch.")
 

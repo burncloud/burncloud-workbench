@@ -10,7 +10,12 @@ from .config import DEFAULT_MODEL_NAME, source_root as default_source_root, work
 from .manifest import TARGET_PAGES
 from .permissions import validate_target_manifest
 from .state import Finding, UIRebuildState
-from .worktree import current_branch, porcelain_status, prepare_agent_worktree
+from .worktree import (
+    current_branch,
+    mark_agent_branch_completed,
+    porcelain_status,
+    prepare_agent_worktree,
+)
 
 
 REQUIRED_SPEC_PATHS = (
@@ -48,7 +53,8 @@ def bootstrap(state: UIRebuildState) -> dict[str, Any]:
         "model_name": state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
         "base_repo_root": base_repo,
         "base_branch": state.get("base_branch", "main"),
-        "source_repo_root": state.get("worktree_root") or base_repo,
+        # v1 branch mode always uses the one BurnCloud checkout so Cargo target/ is reused.
+        "source_repo_root": base_repo,
         "workbench_root": state.get("workbench_root") or str(default_workbench_root()),
         "max_fix_rounds": state.get("max_fix_rounds", 3),
         "completed_pages": list(state.get("completed_pages", [])),
@@ -137,27 +143,26 @@ def permission_guardian(state: UIRebuildState) -> dict[str, Any]:
 
 
 def prepare_worktree(state: UIRebuildState) -> dict[str, Any]:
-    """Create once, then reuse the isolated Agent branch/worktree across runs."""
+    """Prepare or resume an Agent branch in the one BurnCloud checkout.
+
+    The legacy function name remains for compatibility; no Git worktree is created.
+    """
     if state.get("execution_mode", "dry_run") != "write":
-        return {"phase": "worktree_skipped"}
+        return {"phase": "branch_skipped"}
 
-    existing_branch = state.get("agent_branch")
-    existing_root = state.get("worktree_root")
-    if existing_branch and existing_root:
-        root = Path(existing_root).resolve()
-        if not root.exists():
-            raise RuntimeError(f"Recorded Agent worktree no longer exists: {root}")
-        actual = current_branch(root)
-        if actual != existing_branch:
-            raise RuntimeError(f"Recorded Agent worktree branch mismatch: expected {existing_branch!r}, found {actual!r}.")
-        return {"source_repo_root": str(root), "worktree_reused": True, "phase": "worktree_reused"}
-
-    prepared = prepare_agent_worktree(state["base_repo_root"], base_branch=state.get("base_branch", "main"))
-    return {**prepared, "phase": "worktree_reused" if prepared.get("worktree_reused") else "worktree_prepared"}
+    prepared = prepare_agent_worktree(
+        state["base_repo_root"],
+        base_branch=state.get("base_branch", "main"),
+        start_new_task=bool(state.get("start_new_task", False)),
+    )
+    return {
+        **prepared,
+        "phase": "branch_reused" if prepared.get("branch_reused") else "branch_created",
+    }
 
 
 def write_preflight(state: UIRebuildState) -> dict[str, Any]:
-    """Protect main while allowing a reused Agent worktree to retain in-progress diff."""
+    """Require the single BurnCloud checkout to be on the expected Agent branch."""
     if state.get("execution_mode", "dry_run") != "write":
         return {"phase": "write_preflight_skipped"}
 
@@ -165,31 +170,39 @@ def write_preflight(state: UIRebuildState) -> dict[str, Any]:
     source = Path(state["source_repo_root"]).resolve()
     expected_branch = state.get("agent_branch", "")
     if not expected_branch:
-        raise RuntimeError("Live rebuild has no Agent branch; prepare_worktree must run first.")
-    if source == base:
-        raise RuntimeError("Direct writes to the primary BurnCloud checkout are forbidden; an Agent worktree is required.")
+        raise RuntimeError("Live rebuild has no Agent branch; branch preparation must run first.")
+    if source != base:
+        raise RuntimeError(
+            "Harness v1 single-checkout mode requires source_repo_root == base_repo_root; "
+            "Git worktrees are no longer supported."
+        )
 
     actual_branch = current_branch(source)
     if actual_branch in {"main", "master"}:
-        raise RuntimeError(f"Direct writes to protected branch {actual_branch!r} are forbidden.")
+        raise RuntimeError(f"Direct Agent writes to protected branch {actual_branch!r} are forbidden.")
     if actual_branch != expected_branch:
-        raise RuntimeError(f"Agent worktree branch mismatch: expected {expected_branch!r}, current branch is {actual_branch!r}.")
-    if porcelain_status(base):
-        raise RuntimeError("Primary BurnCloud checkout is dirty; refusing Agent writes until main is clean.")
+        raise RuntimeError(
+            f"Agent branch mismatch: expected {expected_branch!r}, current branch is {actual_branch!r}."
+        )
 
     status = porcelain_status(source)
-    reused = bool(state.get("worktree_reused", False))
+    reused = bool(state.get("branch_reused", state.get("worktree_reused", False)))
     if status and not reused:
-        raise RuntimeError("A newly-created Agent worktree must start clean before Builder writes. " f"Current git status:\n{status}")
+        raise RuntimeError(
+            "A newly-created Agent branch must start clean before Builder writes. "
+            f"Current git status:\n{status}"
+        )
 
     warnings = list(state.get("warnings", []))
     if status and reused:
-        warnings.append("Reusing the existing UI rebuild worktree with in-progress Agent changes; this run will continue that diff.")
-        baseline_status = "continuing_existing_changes"
+        warnings.append(
+            "Continuing the current Agent branch with in-progress changes from an earlier failed/blocked run."
+        )
+        baseline_status = "continuing_existing_branch_changes"
     elif reused:
-        baseline_status = "reused_clean_worktree"
+        baseline_status = "reused_clean_agent_branch"
     else:
-        baseline_status = "clean_new_worktree"
+        baseline_status = "clean_new_agent_branch"
     return {"source_baseline_status": baseline_status, "warnings": warnings, "phase": "write_preflight_passed"}
 
 
@@ -247,7 +260,7 @@ def mark_page_complete(state: UIRebuildState) -> dict[str, Any]:
 
 
 def release_agent(state: UIRebuildState) -> dict[str, Any]:
-    """Record release eligibility; v1 still never pushes, merges or writes main."""
+    """Record release eligibility and close the current local branch task."""
     if not state.get("human_decision"):
         return {"release_status": "rejected", "phase": "done"}
     blockers = [item for item in state.get("final_findings", []) if item.get("severity") == "blocker"]
@@ -255,14 +268,20 @@ def release_agent(state: UIRebuildState) -> dict[str, Any]:
         return {
             "release_status": "blocked_by_final_findings",
             "agent_branch": state.get("agent_branch", ""),
-            "worktree_root": state.get("worktree_root", ""),
+            "source_repo_root": state.get("source_repo_root", ""),
             "phase": "done",
         }
     if state.get("execution_mode", "dry_run") == "dry_run":
         return {"release_status": "dry_run_complete_no_git_write", "phase": "done"}
+
+    completion = mark_agent_branch_completed(
+        state["source_repo_root"],
+        state.get("agent_branch") or None,
+    )
     return {
         "release_status": "approved_agent_branch_no_git_publish",
         "agent_branch": state.get("agent_branch", ""),
-        "worktree_root": state.get("worktree_root", ""),
+        "source_repo_root": state.get("source_repo_root", ""),
+        "branch_task_status": completion["status"],
         "phase": "done",
     }

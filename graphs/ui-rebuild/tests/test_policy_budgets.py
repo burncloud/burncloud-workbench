@@ -18,6 +18,6 @@ def test_deep_repository_agent_budgets_are_expanded():
     assert DEFAULT_POLICY.fixer_budget.max_tool_calls == 240
 
 
-def test_graph_token_budget_remains_one_million():
-    assert DEFAULT_POLICY.max_page_tokens == 1_000_000
-    assert DEFAULT_POLICY.max_run_tokens == 1_000_000
+def test_graph_token_budget_is_five_million():
+    assert DEFAULT_POLICY.max_page_tokens == 5_000_000
+    assert DEFAULT_POLICY.max_run_tokens == 5_000_000

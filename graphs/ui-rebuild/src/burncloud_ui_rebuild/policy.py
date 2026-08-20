@@ -27,10 +27,14 @@ class HarnessPolicy:
     max_plan_rounds: int = 2
     max_page_seconds: int = 2_400
     max_run_seconds: int = 7_200
-    # A normal Studio run defaults to one page. Let that page use the full
-    # five-million-token Graph budget rather than tripping an earlier page cap.
+
+    # A Run is a bounded execution slice. A Task may span several Runs on the
+    # same Agent branch. Hitting the Run ceiling should checkpoint/continue, not
+    # force the human to restart the engineering task from Scout.
     max_page_tokens: int = 5_000_000
     max_run_tokens: int = 5_000_000
+    max_task_tokens: int = 15_000_000
+    max_continuation_runs: int = 4
     max_agent_invocations_per_page: int = 12
 
     # Creative edits stay tightly bounded by the approved page plan. Restore is a
@@ -58,9 +62,8 @@ class HarnessPolicy:
     )
 
     # BurnCloud is a large Rust workspace. Keep per-role loop ceilings high enough
-    # for real repository exploration while retaining the five-million-token Graph
-    # budget, wall-clock budgets, invocation budget and deterministic Graph edges as
-    # the outer safety boundaries.
+    # for real repository exploration while retaining token, wall-clock, invocation
+    # and deterministic Graph edges as the outer safety boundaries.
     scout_budget: AgentBudget = AgentBudget(max_model_calls=90, max_tool_calls=240)
     planner_budget: AgentBudget = AgentBudget(max_model_calls=60, max_tool_calls=150)
     builder_budget: AgentBudget = AgentBudget(max_model_calls=120, max_tool_calls=300)

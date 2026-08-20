@@ -16,21 +16,14 @@ from burncloud_ui_rebuild.nodes import (
     spec_agent,
     write_preflight,
 )
-from burncloud_ui_rebuild.notifications import (
-    error_notifying_node,
-    human_review_notification,
-    recovery_review_notification,
-)
+from burncloud_ui_rebuild.notifications import error_notifying_node, human_review_notification, recovery_review_notification
 from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.policy import DEFAULT_POLICY
 from burncloud_ui_rebuild.quality_nodes import human_review_gate, page_checkpoint
 from burncloud_ui_rebuild.recovery_gate import recovery_confirmation_gate
-from burncloud_ui_rebuild.release import (
-    publish_pull_request_node,
-    pull_request_completion_notification,
-    release_preflight_node,
-)
+from burncloud_ui_rebuild.release import publish_pull_request_node, pull_request_completion_notification, release_preflight_node
 from burncloud_ui_rebuild.state import UIRebuildState
+from burncloud_ui_rebuild.task_store import continuation_allowed, continuation_checkpoint_node, restore_task_snapshot_node
 
 
 NODE_DEFAULT_MODE = "默认执行模式"
@@ -41,6 +34,7 @@ NODE_PERMISSION = "权限守卫"
 NODE_WORKTREE = "准备开发分支"
 NODE_RELEASE_PREFLIGHT = "Pull Request 发布预检"
 NODE_PREFLIGHT = "写入预检"
+NODE_TASK_RESTORE = "恢复任务状态"
 NODE_RUN_CONTEXT = "运行上下文"
 NODE_RECOVERY_NOTIFY = "恢复通知"
 NODE_RECOVERY_GATE = "恢复审批"
@@ -50,6 +44,7 @@ NODE_SELECT_PAGE = "选择下一页"
 NODE_PAGE_REBUILD = "页面工程"
 NODE_PAGE_CHECKPOINT = "页面检查点"
 NODE_MARK_COMPLETE = "标记页面完成"
+NODE_CONTINUATION = "保存并自动续跑"
 NODE_FINAL_PERMISSION = "最终质量检查"
 NODE_HUMAN_NOTIFY = "人工审核通知"
 NODE_HUMAN_GATE = "人工审批"
@@ -72,11 +67,20 @@ def _branch_router(state: UIRebuildState) -> str:
     return "继续工程"
 
 
+def _after_recovery(state: UIRebuildState) -> str:
+    if state.get("current_page") and state.get("resume_page_stage") in {"plan", "validate"}:
+        return "恢复页面"
+    return "正常规划"
+
+
 def _page_router(state: UIRebuildState) -> str:
     return "最终检查" if state.get("current_page") is None else "工程页面"
 
 
 def _after_page_rebuild(state: UIRebuildState) -> str:
+    status = state.get("current_page_status")
+    if status == "budget_exhausted" and continuation_allowed(state):
+        return "自动续跑"
     blocked_statuses = {
         "scout_blocked",
         "plan_blocked",
@@ -86,7 +90,7 @@ def _after_page_rebuild(state: UIRebuildState) -> str:
         "fix_exhausted",
         "fix_blocked",
     }
-    return "人工介入" if state.get("current_page_status") in blocked_statuses else "页面通过"
+    return "人工介入" if status in blocked_statuses else "页面通过"
 
 
 def _human_router(state: UIRebuildState) -> str:
@@ -109,6 +113,7 @@ def build_graph(checkpointer=None):
     _add_safe_node(builder, NODE_WORKTREE, prepare_worktree)
     _add_safe_node(builder, NODE_RELEASE_PREFLIGHT, release_preflight_node)
     _add_safe_node(builder, NODE_PREFLIGHT, write_preflight)
+    _add_safe_node(builder, NODE_TASK_RESTORE, restore_task_snapshot_node)
     _add_safe_node(builder, NODE_RUN_CONTEXT, initialize_run_context)
     builder.add_node(NODE_RECOVERY_NOTIFY, recovery_review_notification)
     builder.add_node(NODE_RECOVERY_GATE, recovery_confirmation_gate)
@@ -118,6 +123,7 @@ def build_graph(checkpointer=None):
     builder.add_node(NODE_PAGE_REBUILD, page_rebuild)
     _add_safe_node(builder, NODE_PAGE_CHECKPOINT, page_checkpoint)
     _add_safe_node(builder, NODE_MARK_COMPLETE, mark_page_complete)
+    _add_safe_node(builder, NODE_CONTINUATION, continuation_checkpoint_node)
     _add_safe_node(builder, NODE_FINAL_PERMISSION, final_quality_check)
     builder.add_node(NODE_HUMAN_NOTIFY, human_review_notification)
     builder.add_node(NODE_HUMAN_GATE, human_review_gate)
@@ -130,39 +136,33 @@ def build_graph(checkpointer=None):
     builder.add_edge(NODE_SPEC, NODE_SCOUT)
     builder.add_edge(NODE_SCOUT, NODE_PERMISSION)
     builder.add_edge(NODE_PERMISSION, NODE_WORKTREE)
-    builder.add_conditional_edges(
-        NODE_WORKTREE,
-        _branch_router,
-        {"继续工程": NODE_RELEASE_PREFLIGHT, "提交PR": NODE_RELEASE},
-    )
+    builder.add_conditional_edges(NODE_WORKTREE, _branch_router, {"继续工程": NODE_RELEASE_PREFLIGHT, "提交PR": NODE_RELEASE})
     builder.add_edge(NODE_RELEASE_PREFLIGHT, NODE_PREFLIGHT)
-    builder.add_edge(NODE_PREFLIGHT, NODE_RUN_CONTEXT)
+    builder.add_edge(NODE_PREFLIGHT, NODE_TASK_RESTORE)
+    builder.add_edge(NODE_TASK_RESTORE, NODE_RUN_CONTEXT)
     builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY_NOTIFY)
     builder.add_edge(NODE_RECOVERY_NOTIFY, NODE_RECOVERY_GATE)
     builder.add_edge(NODE_RECOVERY_GATE, NODE_RECOVERY)
-    builder.add_edge(NODE_RECOVERY, NODE_ARCHITECTURE)
+    builder.add_conditional_edges(
+        NODE_RECOVERY,
+        _after_recovery,
+        {"恢复页面": NODE_PAGE_REBUILD, "正常规划": NODE_ARCHITECTURE},
+    )
     builder.add_edge(NODE_ARCHITECTURE, NODE_SELECT_PAGE)
 
-    builder.add_conditional_edges(
-        NODE_SELECT_PAGE,
-        _page_router,
-        {"工程页面": NODE_PAGE_REBUILD, "最终检查": NODE_FINAL_PERMISSION},
-    )
+    builder.add_conditional_edges(NODE_SELECT_PAGE, _page_router, {"工程页面": NODE_PAGE_REBUILD, "最终检查": NODE_FINAL_PERMISSION})
     builder.add_conditional_edges(
         NODE_PAGE_REBUILD,
         _after_page_rebuild,
-        {"页面通过": NODE_PAGE_CHECKPOINT, "人工介入": NODE_FINAL_PERMISSION},
+        {"页面通过": NODE_PAGE_CHECKPOINT, "自动续跑": NODE_CONTINUATION, "人工介入": NODE_FINAL_PERMISSION},
     )
+    builder.add_edge(NODE_CONTINUATION, END)
     builder.add_edge(NODE_PAGE_CHECKPOINT, NODE_MARK_COMPLETE)
     builder.add_edge(NODE_MARK_COMPLETE, NODE_SELECT_PAGE)
     builder.add_edge(NODE_FINAL_PERMISSION, NODE_HUMAN_NOTIFY)
     builder.add_edge(NODE_HUMAN_NOTIFY, NODE_HUMAN_GATE)
 
-    builder.add_conditional_edges(
-        NODE_HUMAN_GATE,
-        _human_router,
-        {"发布": NODE_RELEASE, "结束": END},
-    )
+    builder.add_conditional_edges(NODE_HUMAN_GATE, _human_router, {"发布": NODE_RELEASE, "结束": END})
     builder.add_edge(NODE_RELEASE, NODE_COMPLETION_NOTIFY)
     builder.add_edge(NODE_COMPLETION_NOTIFY, END)
     return builder.compile(checkpointer=checkpointer)
@@ -197,6 +197,11 @@ def initial_state(
         "budget_usage": {},
         "run_context": {},
         "page_context": {},
+        "task_snapshot": {},
+        "task_tokens_before_run": 0,
+        "task_total_tokens": 0,
+        "continuation_runs": 0,
+        "resume_page_stage": "fresh",
         "release_preflight": {},
         "warnings": [],
         "phase": "start",
@@ -204,10 +209,7 @@ def initial_state(
     if page_limit is not None:
         state["page_limit"] = page_limit
     if recovery_target_commit:
-        state["recovery_request"] = {
-            "target_commit": recovery_target_commit,
-            "confirmed": recovery_confirmed,
-        }
+        state["recovery_request"] = {"target_commit": recovery_target_commit, "confirmed": recovery_confirmed}
     return state
 
 

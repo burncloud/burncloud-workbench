@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from .coding_tools import (
-    changed_source_files,
     checkpoint_history,
     head_commit,
     normalize_repo_path,
     restore_page_checkpoint,
 )
 from .engineering_agents import run_page_scout_agent, run_planned_builder_agent, run_planner_agent
+from .git_state import changed_source_files, dirty_fingerprints, page_changed_files_since_baseline
 from .policy import DEFAULT_POLICY, path_is_page_writable
 from .state import Finding, UIRebuildState
 
@@ -147,15 +147,18 @@ def start_page_context(state: UIRebuildState) -> dict[str, Any]:
         return {}
     now = time.time()
     root = state["source_repo_root"]
-    exists = Path(root).exists()
+    write_mode = Path(root).exists() and state.get("execution_mode") == "write"
+    baseline_files = changed_source_files(root) if write_mode else []
+    baseline_fingerprints = dirty_fingerprints(root) if write_mode else {}
     context = {
         "page_id": page["id"],
         "role": page["role"],
         "route": page["route"],
         "contract_path": page["contract_path"],
         "started_at": now,
-        "baseline_commit": head_commit(root) if exists and state.get("execution_mode") == "write" else "",
-        "baseline_dirty_files": changed_source_files(root) if exists and state.get("execution_mode") == "write" else [],
+        "baseline_commit": head_commit(root) if write_mode else "",
+        "baseline_dirty_files": baseline_files,
+        "baseline_dirty_fingerprints": baseline_fingerprints,
         "plan_round": 0,
         "allowed_files": [],
     }
@@ -174,6 +177,9 @@ def start_page_context(state: UIRebuildState) -> dict[str, Any]:
         "fixer_report": {},
         "verification_findings": [],
         "review_findings": [],
+        "changed_files": [],
+        "page_changed_files": [],
+        "page_checkpoint_files": [],
         "last_failure_reason": "",
         "fix_round": 0,
         "current_page_status": "page_context_ready",
@@ -230,12 +236,24 @@ def planner_node(state: UIRebuildState) -> dict[str, Any]:
         }
         return {"implementation_plan": plan, "plan_round": round_no, "current_page_status": "planned"}
 
+    scout_context = dict(state.get("scout_report", {}))
+    preexisting_dirty = list(state.get("page_context", {}).get("baseline_dirty_files", []))
+    scout_context["preexisting_dirty_files"] = preexisting_dirty
+    constraints = list(scout_context.get("constraints", []))
+    if preexisting_dirty:
+        constraints.append(
+            "Retry carry-over rule: preexisting_dirty_files came from the same Agent branch before this page run. "
+            "Include a carry-over file in allowed_files only if its current dirty content genuinely belongs to this page; "
+            "omit unrelated carry-over so Scope Guard/Fixer can restore it safely."
+        )
+    scout_context["constraints"] = constraints
+
     report = run_planner_agent(
         model_name=state["model_name"],
         source_root=state["source_repo_root"],
         workbench_root=state["workbench_root"],
         page=page,
-        scout_report=state.get("scout_report", {}),
+        scout_report=scout_context,
         previous_plan_findings=list(state.get("plan_findings", [])),
     )
     usage = dict(report.pop("_usage", {}))
@@ -355,9 +373,14 @@ def planned_builder_node(state: UIRebuildState) -> dict[str, Any]:
         implementation_plan=state.get("implementation_plan", {}),
     )
     usage = dict(report.pop("_usage", {}))
+    page_delta = page_changed_files_since_baseline(
+        state["source_repo_root"],
+        dict(state.get("page_context", {}).get("baseline_dirty_fingerprints", {})),
+    )
     update: dict[str, Any] = {
         "builder_report": report,
-        "changed_files": changed_source_files(state["source_repo_root"]),
+        "changed_files": page_delta,
+        "page_changed_files": page_delta,
         "current_page_status": "built" if report["status"] == "COMPLETE" else "builder_blocked",
     }
     update.update(accumulate_usage(state, usage))
@@ -366,31 +389,54 @@ def planned_builder_node(state: UIRebuildState) -> dict[str, Any]:
 
 def scope_guard_node(state: UIRebuildState) -> dict[str, Any]:
     if state.get("execution_mode", "dry_run") != "write":
-        return {"changed_files": [], "verification_findings": [], "current_page_status": "scope_passed"}
+        return {
+            "changed_files": [],
+            "page_changed_files": [],
+            "page_checkpoint_files": [],
+            "verification_findings": [],
+            "current_page_status": "scope_passed",
+        }
 
     allowed = {
         normalize_repo_path(str(path))
         for path in state.get("implementation_plan", {}).get("allowed_files", [])
     }
-    changed = changed_source_files(state["source_repo_root"])
+    page_context = dict(state.get("page_context", {}))
+    baseline_dirty = set(page_context.get("baseline_dirty_files", []))
+    baseline_fingerprints = dict(page_context.get("baseline_dirty_fingerprints", {}))
+    current_dirty = set(changed_source_files(state["source_repo_root"]))
+    page_delta = set(page_changed_files_since_baseline(state["source_repo_root"], baseline_fingerprints))
     findings = list(state.get("verification_findings", []))
 
-    unexpected = sorted(path for path in changed if path not in allowed)
-    if unexpected:
+    cleaned_carryover = baseline_dirty - current_dirty
+    unexpected_delta = sorted((page_delta - allowed) - cleaned_carryover)
+    carryover_unplanned = sorted((current_dirty & baseline_dirty) - allowed)
+    checkpoint_files = sorted(current_dirty & allowed)
+    effective_page_files = set(checkpoint_files) | set(unexpected_delta)
+
+    if unexpected_delta:
         findings.append(Finding(
             severity="blocker",
             code="SCOPE_GUARD_UNPLANNED_FILES",
-            message=f"Builder changed files outside the approved plan: {unexpected}",
+            message=f"This page run changed files outside the approved plan: {unexpected_delta}",
             evidence=f"allowed_files={sorted(allowed)}",
-            expected="Restore unrelated files or re-plan explicitly before editing them.",
+            expected="Restore page-local pollution or re-plan explicitly before editing it.",
         ))
-    if len(changed) > DEFAULT_POLICY.max_write_files_per_agent:
+    if carryover_unplanned:
+        findings.append(Finding(
+            severity="blocker",
+            code="SCOPE_GUARD_PREEXISTING_DIRTY",
+            message=f"Retry branch still contains pre-existing dirty files outside this page plan: {carryover_unplanned}",
+            evidence=f"baseline_dirty_files={sorted(baseline_dirty)}; allowed_files={sorted(allowed)}",
+            expected="Planner must explicitly preserve relevant carry-over in allowed_files; Fixer should restore unrelated carry-over to HEAD.",
+        ))
+    if len(effective_page_files) > DEFAULT_POLICY.max_write_files_per_agent:
         findings.append(Finding(
             severity="blocker",
             code="SCOPE_GUARD_FILE_BUDGET",
-            message=f"Page diff touches {len(changed)} files; maximum is {DEFAULT_POLICY.max_write_files_per_agent}.",
+            message=f"Page-owned diff touches {len(effective_page_files)} files; maximum is {DEFAULT_POLICY.max_write_files_per_agent}.",
         ))
-    for path in changed:
+    for path in sorted(effective_page_files):
         if not path_is_page_writable(path):
             findings.append(Finding(
                 severity="blocker",
@@ -400,7 +446,9 @@ def scope_guard_node(state: UIRebuildState) -> dict[str, Any]:
             ))
 
     return {
-        "changed_files": changed,
+        "changed_files": checkpoint_files,
+        "page_changed_files": sorted(page_delta),
+        "page_checkpoint_files": checkpoint_files,
         "verification_findings": findings,
         "current_page_status": "scope_failed" if findings else "scope_passed",
     }

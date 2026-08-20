@@ -58,7 +58,6 @@ def test_prepare_agent_branch_uses_same_checkout(tmp_path: Path):
     assert head_commit(repo) == baseline
     assert result["base_commit"] == baseline
     assert porcelain_status(repo) == ""
-    # The Harness must not create a second checkout/worktree.
     assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
@@ -145,23 +144,43 @@ def test_prepare_agent_branch_refuses_unrelated_branch(tmp_path: Path):
         prepare_agent_worktree(repo)
 
 
-def test_migrate_legacy_worktree_preserves_dirty_changes(tmp_path: Path):
+def test_migrate_all_legacy_worktrees_preserves_current_and_archives_older_dirty_tasks(tmp_path: Path):
     repo = _repo(tmp_path)
-    legacy = tmp_path / "legacy-ui-rebuild"
-    branch = "agent/ui-rebuild/20260820-120000-1234abcd"
-    _git(repo, "worktree", "add", "-b", branch, str(legacy), "HEAD")
+    older = tmp_path / "legacy-older"
+    active = tmp_path / "legacy-active"
+    older_branch = "agent/ui-rebuild/20260820-120000-1111aaaa"
+    active_branch = "agent/ui-rebuild/20260820-130000-2222bbbb"
+    _git(repo, "worktree", "add", "-b", older_branch, str(older), "HEAD")
+    _git(repo, "worktree", "add", "-b", active_branch, str(active), "HEAD")
 
-    (legacy / "README.md").write_text("dirty legacy change\n", encoding="utf-8")
-    (legacy / "new-file.txt").write_text("untracked legacy file\n", encoding="utf-8")
-    assert porcelain_status(legacy)
+    (older / "README.md").write_text("older dirty change\n", encoding="utf-8")
+    (older / "older-untracked.txt").write_text("archive me\n", encoding="utf-8")
+    (older / "target/debug").mkdir(parents=True)
+    (older / "target/debug/old-cache").write_text("discard old cache\n", encoding="utf-8")
+
+    (active / "README.md").write_text("active dirty change\n", encoding="utf-8")
+    (active / "active-untracked.txt").write_text("restore me\n", encoding="utf-8")
+    (active / "target/debug").mkdir(parents=True)
+    (active / "target/debug/active-cache").write_text("discard old cache\n", encoding="utf-8")
+
+    assert porcelain_status(older)
+    assert porcelain_status(active)
     assert current_branch(repo) == "main"
 
     result = migrate_legacy_agent_worktree(repo)
 
     assert result["status"] == "migrated"
-    assert result["agent_branch"] == branch
+    assert result["agent_branch"] == active_branch
     assert result["restored_dirty_changes"] is True
-    assert current_branch(repo) == branch
-    assert (repo / "README.md").read_text(encoding="utf-8") == "dirty legacy change\n"
-    assert (repo / "new-file.txt").read_text(encoding="utf-8") == "untracked legacy file\n"
-    assert not legacy.exists()
+    assert result["remaining_legacy_worktrees"] == 0
+    assert current_branch(repo) == active_branch
+    assert (repo / "README.md").read_text(encoding="utf-8") == "active dirty change\n"
+    assert (repo / "active-untracked.txt").read_text(encoding="utf-8") == "restore me\n"
+    assert not active.exists()
+    assert not older.exists()
+    assert len(result["archived_legacy_tasks"]) == 1
+    archived = result["archived_legacy_tasks"][0]
+    assert archived["agent_branch"] == older_branch
+    assert archived["dirty_changes_preserved"] is True
+    assert archived["stash_commit"]
+    assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1

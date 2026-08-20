@@ -91,6 +91,19 @@ def agent_branch_is_completed(repo_root: str | Path, branch: str | None = None) 
     return bool(selected) and _completed_branch(root) == selected
 
 
+def agent_branch_is_integrated(
+    repo_root: str | Path,
+    branch: str | None = None,
+    *,
+    base_branch: str = "main",
+) -> bool:
+    """Return whether all commits on an Agent branch are already contained in main."""
+    root = Path(repo_root).resolve()
+    selected = _validate_branch_name(branch or current_branch(root))
+    code, _ = _run_git(root, "merge-base", "--is-ancestor", selected, base_branch, check=False)
+    return code == 0
+
+
 def _listed_worktrees(root: Path) -> list[dict[str, str]]:
     """Read linked worktrees only for one-time migration detection."""
     output = _git(root, "worktree", "list", "--porcelain")
@@ -266,6 +279,7 @@ def _create_agent_branch(root: Path, *, base_branch: str) -> dict[str, Any]:
         "agent_branch": agent_branch,
         "source_repo_root": str(root),
         "branch_reused": False,
+        "branch_task_status": "active",
         # Compatibility fields: no worktree is created. Both roots are the one checkout.
         "worktree_root": str(root),
         "worktree_reused": False,
@@ -284,7 +298,7 @@ def find_reusable_agent_worktree(base_repo_root: str | Path) -> dict[str, str] |
         _validate_branch_name(branch)
     except WorktreeError:
         return None
-    if agent_branch_is_completed(root, branch):
+    if agent_branch_is_completed(root, branch) and agent_branch_is_integrated(root, branch):
         return None
     return {
         "agent_branch": branch,
@@ -304,6 +318,11 @@ def prepare_agent_worktree(
 
     No new Git worktree is ever created. The legacy function name is kept only
     so older modules and persisted Studio state remain compatible.
+
+    A failed/blocked branch is always resumed. A successful branch is only rolled
+    over automatically after its commits are already contained by `base_branch`;
+    this prevents a Human-Gate-approved but not-yet-merged branch from being
+    silently abandoned on the next Studio run.
     """
     del worktree_parent
     root = Path(base_repo_root).resolve()
@@ -316,8 +335,11 @@ def prepare_agent_worktree(
     if branch_now.startswith(AGENT_BRANCH_PREFIX):
         _validate_branch_name(branch_now)
         completed = agent_branch_is_completed(root, branch_now)
-        if not start_new_task and not completed:
+        integrated = agent_branch_is_integrated(root, branch_now, base_branch=base_branch)
+
+        if not start_new_task and (not completed or not integrated):
             base_commit = _git(root, "merge-base", base_branch, branch_now).strip()
+            task_status = "completed_unintegrated" if completed else "active"
             return {
                 "base_repo_root": str(root),
                 "base_branch": base_branch,
@@ -325,12 +347,13 @@ def prepare_agent_worktree(
                 "agent_branch": branch_now,
                 "source_repo_root": str(root),
                 "branch_reused": True,
+                "branch_task_status": task_status,
                 "worktree_root": str(root),
                 "worktree_reused": True,
             }
 
         if status:
-            reason = "explicit new task" if start_new_task else "completed task rollover"
+            reason = "explicit new task" if start_new_task else "completed-and-integrated task rollover"
             raise WorktreeError(
                 f"Cannot perform {reason} while Agent branch {branch_now!r} is dirty. "
                 "Retry/fix on this branch first, or explicitly clean/checkpoint the task before starting over. "

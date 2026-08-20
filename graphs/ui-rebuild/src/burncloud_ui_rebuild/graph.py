@@ -18,7 +18,7 @@ from burncloud_ui_rebuild.nodes import (
 )
 from burncloud_ui_rebuild.notifications import error_notifying_node, human_review_notification, recovery_review_notification
 from burncloud_ui_rebuild.page_graph import build_page_graph
-from burncloud_ui_rebuild.policy import DEFAULT_POLICY
+from burncloud_ui_rebuild.policy import DEFAULT_POLICY, blocking_findings
 from burncloud_ui_rebuild.quality_nodes import human_review_gate, page_checkpoint
 from burncloud_ui_rebuild.recovery_gate import recovery_confirmation_gate
 from burncloud_ui_rebuild.release import publish_pull_request_node, pull_request_completion_notification, release_preflight_node
@@ -46,6 +46,7 @@ NODE_PAGE_CHECKPOINT = "页面检查点"
 NODE_MARK_COMPLETE = "标记页面完成"
 NODE_CONTINUATION = "保存并自动续跑"
 NODE_FINAL_PERMISSION = "最终质量检查"
+NODE_AUTO_APPROVE = "自动批准"
 NODE_HUMAN_NOTIFY = "人工审核通知"
 NODE_HUMAN_GATE = "人工审批"
 NODE_RELEASE = "提交 Pull Request"
@@ -58,6 +59,7 @@ def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
         "page_limit": state.get("page_limit", DEFAULT_POLICY.default_page_limit),
         "max_fix_rounds": state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds),
         "start_new_task": bool(state.get("start_new_task", False)),
+        "autopilot_mode": bool(state.get("autopilot_mode", False)),
     }
 
 
@@ -68,7 +70,7 @@ def _branch_router(state: UIRebuildState) -> str:
 
 
 def _after_recovery(state: UIRebuildState) -> str:
-    if state.get("current_page") and state.get("resume_page_stage") in {"plan", "validate"}:
+    if state.get("current_page") and state.get("resume_page_stage") in {"plan", "build", "validate"}:
         return "恢复页面"
     return "正常规划"
 
@@ -91,6 +93,16 @@ def _after_page_rebuild(state: UIRebuildState) -> str:
         "fix_blocked",
     }
     return "人工介入" if status in blocked_statuses else "页面通过"
+
+
+def _final_gate_router(state: UIRebuildState) -> str:
+    if state.get("autopilot_mode") and not blocking_findings(state.get("final_findings", [])):
+        return "自动批准"
+    return "人工审核"
+
+
+def _auto_approve(state: UIRebuildState) -> dict[str, object]:
+    return {"human_decision": True, "phase": "auto_approved"}
 
 
 def _human_router(state: UIRebuildState) -> str:
@@ -125,6 +137,7 @@ def build_graph(checkpointer=None):
     _add_safe_node(builder, NODE_MARK_COMPLETE, mark_page_complete)
     _add_safe_node(builder, NODE_CONTINUATION, continuation_checkpoint_node)
     _add_safe_node(builder, NODE_FINAL_PERMISSION, final_quality_check)
+    _add_safe_node(builder, NODE_AUTO_APPROVE, _auto_approve)
     builder.add_node(NODE_HUMAN_NOTIFY, human_review_notification)
     builder.add_node(NODE_HUMAN_GATE, human_review_gate)
     _add_safe_node(builder, NODE_RELEASE, publish_pull_request_node)
@@ -143,11 +156,7 @@ def build_graph(checkpointer=None):
     builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY_NOTIFY)
     builder.add_edge(NODE_RECOVERY_NOTIFY, NODE_RECOVERY_GATE)
     builder.add_edge(NODE_RECOVERY_GATE, NODE_RECOVERY)
-    builder.add_conditional_edges(
-        NODE_RECOVERY,
-        _after_recovery,
-        {"恢复页面": NODE_PAGE_REBUILD, "正常规划": NODE_ARCHITECTURE},
-    )
+    builder.add_conditional_edges(NODE_RECOVERY, _after_recovery, {"恢复页面": NODE_PAGE_REBUILD, "正常规划": NODE_ARCHITECTURE})
     builder.add_edge(NODE_ARCHITECTURE, NODE_SELECT_PAGE)
 
     builder.add_conditional_edges(NODE_SELECT_PAGE, _page_router, {"工程页面": NODE_PAGE_REBUILD, "最终检查": NODE_FINAL_PERMISSION})
@@ -159,9 +168,13 @@ def build_graph(checkpointer=None):
     builder.add_edge(NODE_CONTINUATION, END)
     builder.add_edge(NODE_PAGE_CHECKPOINT, NODE_MARK_COMPLETE)
     builder.add_edge(NODE_MARK_COMPLETE, NODE_SELECT_PAGE)
-    builder.add_edge(NODE_FINAL_PERMISSION, NODE_HUMAN_NOTIFY)
+    builder.add_conditional_edges(
+        NODE_FINAL_PERMISSION,
+        _final_gate_router,
+        {"自动批准": NODE_AUTO_APPROVE, "人工审核": NODE_HUMAN_NOTIFY},
+    )
+    builder.add_edge(NODE_AUTO_APPROVE, NODE_RELEASE)
     builder.add_edge(NODE_HUMAN_NOTIFY, NODE_HUMAN_GATE)
-
     builder.add_conditional_edges(NODE_HUMAN_GATE, _human_router, {"发布": NODE_RELEASE, "结束": END})
     builder.add_edge(NODE_RELEASE, NODE_COMPLETION_NOTIFY)
     builder.add_edge(NODE_COMPLETION_NOTIFY, END)
@@ -177,6 +190,7 @@ def initial_state(
     recovery_target_commit: str = "",
     recovery_confirmed: bool = False,
     start_new_task: bool = False,
+    autopilot_mode: bool = False,
 ) -> UIRebuildState:
     base_repo = str(source_root())
     state: UIRebuildState = {
@@ -189,6 +203,7 @@ def initial_state(
         "workbench_root": str(workbench_root()),
         "max_fix_rounds": DEFAULT_POLICY.max_fix_rounds,
         "start_new_task": start_new_task,
+        "autopilot_mode": autopilot_mode,
         "completed_pages": [],
         "implementation_results": [],
         "page_checkpoint_history": [],

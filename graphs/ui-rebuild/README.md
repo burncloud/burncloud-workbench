@@ -2,7 +2,7 @@
 
 这是 BurnCloud Buyer / Supplier / Admin Console 的可执行 LangGraph 软件交付 Harness。
 
-它的核心不是“多放几个 Agent”，而是把 AI 的判断力放进受控节点，把可靠性、权限、预算、验证、Git 生命周期放进确定性代码和边。
+它的核心不是“多放几个 Agent”，而是把 AI 的判断力放进受控节点，把可靠性、权限、预算、验证、Git 生命周期和 Release 生命周期放进确定性代码和边。
 
 ## v1 核心原则
 
@@ -14,7 +14,8 @@ Policy          负责哪些事情绝对不能越界
 Reality Anchor  负责现实事实
 Git Checkpoint  负责外部副作用恢复
 Human Gate      负责最终高风险批准
-Notification    负责异常、人工审核和成功完成的外部提醒
+Release Graph   负责 push Agent branch + Draft PR
+Notification    负责异常、人工审核和 PR 完成的外部提醒
 ```
 
 固定产品边界：
@@ -41,6 +42,7 @@ Buyer / Supplier / Admin 是独立 Workspace Role；普通账号可以同时拥�
 → 仓库侦察
 → 权限守卫
 → 准备开发分支
+→ Pull Request 发布预检
 → 写入预检
 → 运行上下文
 → 恢复通知（仅需要恢复审批时）
@@ -54,9 +56,11 @@ Buyer / Supplier / Admin 是独立 Workspace Role；普通账号可以同时拥�
 → 最终质量检查
 → 人工审核通知
 → 人工审批
-→ 发布状态
-→ 完成通知（仅成功完成时）
+→ 提交 Pull Request
+→ 完成通知
 ```
+
+如果当前 Agent branch 已经是 `completed` 但尚未进入 main，新 Graph Run 不会重新执行页面工程，而是直接进入 `提交 Pull Request`，复用同一个 PR。
 
 ## 页面工程子图
 
@@ -222,6 +226,13 @@ BudgetUsage
 ├ page budget counters
 └ run budget counters
 
+Release State
+├ release preflight
+├ branch task status
+├ pull request number
+├ pull request url
+└ pull request status
+
 NotificationHistory
 ├ event
 ├ sent / failed / disabled / deduplicated
@@ -261,12 +272,21 @@ ACTIVE / BLOCKED / ERROR
 → 保留 dirty diff + target cache
 
 SUCCESS + Human Gate 通过
-→ 当前 Agent branch 标记 completed
+→ 确认 Agent branch clean
+→ git push --set-upstream origin <agent-branch>
+→ 查找同 branch / main 的现有 PR
+   ├ open → 复用
+   ├ closed 且未 merge → fail closed，人工处理
+   ├ merged → 绝不创建重复 PR
+   └ 不存在 → 创建一个 Draft PR
+→ branch 标记 completed / awaiting_pr_merge
+→ Telegram 发送 PR URL
 → 当前 Run 结束时不切 branch
 
-completed 但尚未被 main 包含
-→ 继续保留当前 Agent branch
-→ 不自动从 main 新开，避免丢掉尚未合并的成果
+completed / awaiting_pr_merge 且尚未被 main 包含
+→ 新 Graph Run 直接进入提交 PR 节点
+→ 不重新跑 Scout/Planner/Builder/Page Graph
+→ 不创建第二个 PR
 
 completed 且 main 已经包含该 branch 的全部 commit
 → 下一次 Graph Run 才自动 git switch main
@@ -274,7 +294,7 @@ completed 且 main 已经包含该 branch 的全部 commit
 → target cache 仍在同一 checkout 中
 ```
 
-这意味着“成功”与“已进入 main”是两个不同状态。当前 v1 Release 只创建本地 checkpoint 和 Human Gate，不会自动 push/merge，因此在真正合入 main 之前，Harness 不会自动抛弃成功 branch。
+这意味着“Graph 完成”“PR 已提交”“PR 已合入 main”是三个独立状态。Harness 自动做到 PR 提交，但不会自动 merge。
 
 另外支持显式新任务：
 
@@ -351,7 +371,7 @@ Scope PASS
 agent(ui): checkpoint <page-id>
 ```
 
-LLM Agent 本身没有 commit / push / merge 权限。
+LLM Agent 本身没有 commit / push / PR / merge 权限。页面 commit、最终 push 和 Draft PR 都由确定性 Harness 节点执行。
 
 ## Recovery
 
@@ -377,6 +397,28 @@ Recovery 规则：
 - main 永远不参与恢复。
 - Studio 中需要恢复确认时，会在真正 `interrupt()` 前先发送 Telegram 人工审核提醒。
 
+## GitHub Release 预检
+
+因为成功任务必须提交 PR，所以 write Graph 在消耗模型预算之前先检查：
+
+```text
+GitHub CLI gh 存在
+git remote origin 存在且指向 github.com
+gh auth status 成功
+```
+
+第一次机器配置可执行：
+
+```bat
+gh --version
+gh auth login
+gh auth status
+```
+
+预检失败会由 Graph Error Boundary 发送 Telegram，并立即停止本轮，不会等跑完 100 万 Token 后才发现无法创建 PR。
+
+Release 不使用 force-push；普通 push 发生冲突或权限失败时直接报错。PR 默认创建为 Draft，并且永远不会由这一阶段自动 merge。
+
 ## Telegram 通知
 
 通知由 Harness 的确定性 Notification Layer 负责，不交给 LLM Agent。
@@ -384,7 +426,7 @@ Recovery 规则：
 触发规则：
 
 ```text
-任何普通 Graph/Page Node 抛异常
+任何普通 Graph/Page/Release Node 抛异常
 → 🚨 图错误通知
 
 进入 Git Recovery 人工确认
@@ -393,11 +435,11 @@ Recovery 规则：
 进入最终 Human Gate
 → 🟡 需要人工审核通知
 
-write Run 通过 Human Gate 并达到 approved_agent_branch_no_git_publish
-→ ✅ 任务完成通知
+write Run 通过 Human Gate，push 成功并创建/复用 Draft PR
+→ ✅ 任务完成 + PR URL 通知
 ```
 
-通知内容会包含节点、页面、状态、Agent branch、Thread/Run ID、首个阻塞原因或最新 checkpoint 等必要信息，但不会主动发送 API Key、Bot Token 等 Secret。
+通知内容会包含节点、页面、状态、Agent branch、Thread/Run ID、首个阻塞原因、最新 checkpoint 或 PR URL 等必要信息，但不会主动发送 API Key、Bot Token 等 Secret。
 
 Telegram 投递原则：
 
@@ -472,6 +514,8 @@ burncloud-ui-rebuild studio
 }
 ```
 
+到最终人工审批节点批准后，Harness 会自动 push Agent branch 并创建/复用一个 Draft PR 到 `main`。
+
 ## CLI
 
 继续当前任务（失败/重试默认就是这个）：
@@ -484,6 +528,12 @@ burncloud-ui-rebuild rebuild --write --limit 1
 
 ```bat
 burncloud-ui-rebuild rebuild --write --limit 1 --new-task
+```
+
+CLI 自动通过最终 Human Gate（随后自动提交 Draft PR）：
+
+```bat
+burncloud-ui-rebuild rebuild --write --limit 1 --approve
 ```
 
 Dry run：
@@ -515,16 +565,17 @@ burncloud-ui-rebuild telegram-check
 确定性验证
 本地 page checkpoint commit
 Human Gate
-Telegram 生命周期通知
+普通 git push 当前 Agent branch
+创建或复用一个 Draft Pull Request → main
+Telegram 生命周期 + PR URL 通知
 ```
 
 当前 Harness 不会自动：
 
 ```text
-push
-创建 PR
-merge
-写 main
+force-push
+merge Pull Request
+直接写 main
 ```
 
-这些动作仍属于后续 Release Graph，并且必须在 Human Gate 后执行。
+也就是说 Release Graph 已经负责“把 completed 任务提交成 PR”，但最终合并仍然保持独立人工边界。

@@ -11,6 +11,7 @@ from burncloud_ui_rebuild.coding_tools import checkpoint_history, restore_page_c
 from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root
 from burncloud_ui_rebuild.graph import build_graph, initial_state
 from burncloud_ui_rebuild.notifications import telegram_check
+from burncloud_ui_rebuild.studio_supervisor import run_studio_supervisor
 from burncloud_ui_rebuild.worktree import find_reusable_agent_worktree
 
 
@@ -68,6 +69,10 @@ def main() -> None:
     check.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
 
     sub.add_parser("telegram-check", help="Send one Telegram test notification using local environment secrets.")
+    sub.add_parser(
+        "studio",
+        help="Run langgraph dev under an outer supervisor that Telegram-alerts startup/import crashes.",
+    )
 
     rebuild = sub.add_parser("rebuild", help="Run the real v1 Scout→Plan→Build→Verify→Review graph.")
     rebuild.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
@@ -97,6 +102,9 @@ def main() -> None:
         if result.get("status") != "sent":
             raise SystemExit(1)
         return
+
+    if args.command == "studio":
+        raise SystemExit(run_studio_supervisor())
 
     if args.command == "checkpoints":
         root = _current_agent_worktree()

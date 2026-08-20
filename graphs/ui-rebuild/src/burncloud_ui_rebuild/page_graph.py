@@ -51,6 +51,8 @@ def _after_page_entry(state: UIRebuildState) -> str:
     stage = str(state.get("resume_page_stage", "fresh"))
     if stage == "validate":
         return "安全验证"
+    if stage == "build":
+        return "继续施工"
     if stage == "plan":
         return "继续规划"
     return "新页面"
@@ -265,6 +267,7 @@ def build_page_graph():
         {
             "新页面": PAGE_NODE_CONTEXT,
             "继续规划": PAGE_NODE_PLANNER,
+            "继续施工": PAGE_NODE_PLAN_GUARD,
             "安全验证": PAGE_NODE_SCOPE_GUARD,
         },
     )

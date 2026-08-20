@@ -8,7 +8,7 @@ from langgraph.types import interrupt
 from .coding_tools import normalize_repo_path, run_named_validation
 from .engineering_agents import run_v1_fixer_agent, run_v1_reviewer_agent
 from .engineering_nodes import accumulate_usage, apply_budget_guard
-from .format_validation import run_page_rustfmt_check
+from .format_validation import run_page_rustfmt_apply, run_page_rustfmt_check
 from .git_state import changed_source_files, create_scoped_page_checkpoint, page_changed_files_since_baseline
 from .policy import DEFAULT_POLICY, blocking_findings
 from .state import Finding, UIRebuildState
@@ -48,6 +48,41 @@ def _restore_scope(state: UIRebuildState) -> list[str]:
     return sorted(page_pollution | stale_carryover)
 
 
+def page_formatter(state: UIRebuildState) -> dict[str, Any]:
+    """Apply deterministic rustfmt before code validation.
+
+    Formatting is not a reasoning task. Once Scope Guard approves the page-owned
+    files, Python formats those Rust files directly. The graph performs a second
+    Scope Guard afterwards so formatter side effects cannot silently widen scope.
+    Syntax/parser failures remain blocking findings for Fixer.
+    """
+    if state.get("execution_mode", "dry_run") != "write":
+        return {"current_page_status": "format_skipped"}
+
+    changed_files = _changed_files(state)
+    result = run_page_rustfmt_apply(state["source_repo_root"], changed_files)
+    findings = list(state.get("verification_findings", []))
+    results = list(state.get("validation_results", []))
+    results.append(result)
+
+    if result["returncode"] != 0:
+        findings.append(Finding(
+            severity="blocker",
+            code="VALIDATION_PAGE_RUSTFMT_APPLY",
+            message="Deterministic page rustfmt failed; the page likely contains a Rust syntax/parse issue rather than a style-only mismatch.",
+            evidence=str(result["output"]),
+            expected="Fix the syntax/parse issue inside the approved plan, then rerun deterministic formatting.",
+        ))
+
+    update: dict[str, Any] = {
+        "verification_findings": findings,
+        "validation_results": results,
+        "changed_files": _changed_files(state),
+        "current_page_status": "formatted" if not blocking_findings(findings) else "format_failed",
+    }
+    return apply_budget_guard(state, update)
+
+
 def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     page = state.get("current_page")
     findings = list(state.get("verification_findings", []))
@@ -65,9 +100,9 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     changed_files = _changed_files(state)
     if state.get("execution_mode", "dry_run") == "write":
         for name in DEFAULT_POLICY.code_validations:
-            # Formatting is a page-local invariant: only files approved by the Plan
-            # and still dirty for this page are checked. Compile/test gates remain
-            # crate/workspace-wide because they represent integration reality.
+            # rustfmt has already been applied deterministically. Keep a scoped
+            # --check here as an invariant assertion; compile/test gates remain
+            # crate/workspace-wide integration facts.
             if name == "cargo_fmt_check":
                 result = run_page_rustfmt_check(state["source_repo_root"], changed_files)
             else:

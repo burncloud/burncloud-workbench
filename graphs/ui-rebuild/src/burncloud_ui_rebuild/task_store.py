@@ -62,11 +62,21 @@ def _resume_stage(snapshot: dict[str, Any]) -> str:
         return "fresh"
     status = str(snapshot.get("current_page_status", ""))
     plan = snapshot.get("implementation_plan", {}) or {}
+    scout = snapshot.get("scout_report", {}) or {}
+    builder = snapshot.get("builder_report", {}) or {}
+    safe_node = str(snapshot.get("safe_node", ""))
+
     if status in {"scouted", "plan_blocked", "plan_rejected", "replan_requested"}:
         return "plan"
     if plan.get("status") == "COMPLETE" and plan.get("allowed_files"):
-        return "validate"
-    scout = snapshot.get("scout_report", {}) or {}
+        # If a Run ended immediately after planning, the old Builder report may be
+        # from a previous plan round. Re-enter through Plan Guard/Builder instead of
+        # assuming the revised plan was implemented.
+        if safe_node in {"修改计划", "计划守卫"}:
+            return "build"
+        if builder.get("status") == "COMPLETE":
+            return "validate"
+        return "build"
     if scout.get("status") == "COMPLETE":
         return "plan"
     return "fresh"
@@ -107,13 +117,6 @@ def build_task_snapshot(state: UIRebuildState, *, safe_node: str) -> dict[str, A
 
 
 def _checkpoint_ready(state: UIRebuildState) -> bool:
-    """Prevent startup/preflight nodes from overwriting an existing Task file.
-
-    Before Restore Task State runs, a new Graph invocation has no page context and
-    must be read-only with respect to the persisted task. Once a page exists or a
-    task snapshot has already been restored/saved in this invocation, safe-node
-    checkpointing may proceed.
-    """
     if state.get("current_page"):
         return True
     marker = state.get("task_snapshot", {}) or {}
@@ -196,8 +199,6 @@ def restore_task_snapshot_node(state: UIRebuildState) -> dict[str, Any]:
         "page_checkpoint_files": list(snapshot.get("page_checkpoint_files", [])),
         "page_checkpoint": dict(snapshot.get("page_checkpoint", {})),
         "page_checkpoint_history": list(snapshot.get("page_checkpoint_history", [])),
-        # Active findings are deliberately cleared. Continuations re-run deterministic
-        # gates instead of carrying stale failures as permanent blockers.
         "verification_findings": [],
         "review_findings": [],
         "validation_results": [],

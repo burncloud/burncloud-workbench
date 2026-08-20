@@ -61,6 +61,8 @@ class RunContext(TypedDict, total=False):
     branch_reused: bool
     model_name: str
     page_limit: int
+    task_tokens_before_run: int
+    continuation_runs: int
 
 
 class PageContext(TypedDict, total=False):
@@ -109,6 +111,14 @@ class UIRebuildState(TypedDict, total=False):
     branch_task_status: str
     workbench_root: str
     max_fix_rounds: int
+
+    # Cross-Run Task persistence. One engineering Task can consume multiple
+    # bounded Runs while staying on the same Agent branch.
+    task_snapshot: dict[str, Any]
+    task_tokens_before_run: int
+    task_total_tokens: int
+    continuation_runs: int
+    resume_page_stage: str
 
     # Temporary compatibility fields for old persisted Studio threads. New runs
     # never create a Git worktree; worktree_root, if present, equals source_repo_root.

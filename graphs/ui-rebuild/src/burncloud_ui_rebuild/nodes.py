@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +41,9 @@ def _sha256(path: Path) -> str:
 def bootstrap(state: UIRebuildState) -> dict[str, Any]:
     """Populate deterministic defaults before any repository or Agent work."""
     base_repo = state.get("base_repo_root") or state.get("source_repo_root") or str(default_source_root())
+    run_id = state.get("thread_id") or f"burncloud-studio-{uuid.uuid4().hex[:12]}"
     return {
-        "thread_id": state.get("thread_id", "burncloud-graph-engineering-v1"),
+        "thread_id": run_id,
         "execution_mode": state.get("execution_mode", "dry_run"),
         "model_name": state.get("model_name", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
         "base_repo_root": base_repo,
@@ -51,6 +53,7 @@ def bootstrap(state: UIRebuildState) -> dict[str, Any]:
         "max_fix_rounds": state.get("max_fix_rounds", 3),
         "completed_pages": list(state.get("completed_pages", [])),
         "implementation_results": list(state.get("implementation_results", [])),
+        "notification_history": list(state.get("notification_history", [])),
         "warnings": list(state.get("warnings", [])),
         "phase": "bootstrapped",
     }

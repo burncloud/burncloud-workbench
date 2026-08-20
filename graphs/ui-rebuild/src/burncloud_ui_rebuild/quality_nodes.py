@@ -8,6 +8,7 @@ from langgraph.types import interrupt
 from .coding_tools import normalize_repo_path, run_named_validation
 from .engineering_agents import run_v1_fixer_agent, run_v1_reviewer_agent
 from .engineering_nodes import accumulate_usage, apply_budget_guard
+from .format_validation import run_page_rustfmt_check
 from .git_state import changed_source_files, create_scoped_page_checkpoint, page_changed_files_since_baseline
 from .policy import DEFAULT_POLICY, blocking_findings
 from .state import Finding, UIRebuildState
@@ -61,9 +62,16 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     if not contract.exists():
         findings.append(Finding(severity="blocker", code="MISSING_PAGE_CONTRACT", message=f'Missing page contract for {page["id"]}.', expected=page["contract_path"]))
 
+    changed_files = _changed_files(state)
     if state.get("execution_mode", "dry_run") == "write":
         for name in DEFAULT_POLICY.code_validations:
-            result = run_named_validation(state["source_repo_root"], name)
+            # Formatting is a page-local invariant: only files approved by the Plan
+            # and still dirty for this page are checked. Compile/test gates remain
+            # crate/workspace-wide because they represent integration reality.
+            if name == "cargo_fmt_check":
+                result = run_page_rustfmt_check(state["source_repo_root"], changed_files)
+            else:
+                result = run_named_validation(state["source_repo_root"], name)
             results.append(result)
             if result["returncode"] != 0:
                 findings.append(Finding(severity="blocker", code=f"VALIDATION_{name.upper()}", message=f"Code validation failed: {name}", evidence=str(result["output"]), expected="returncode 0"))
@@ -71,7 +79,7 @@ def code_verifier(state: UIRebuildState) -> dict[str, Any]:
     update: dict[str, Any] = {
         "verification_findings": findings,
         "validation_results": results,
-        "changed_files": _changed_files(state),
+        "changed_files": changed_files,
         "current_page_status": "code_verified" if not blocking_findings(findings) else "verification_failed",
     }
     return apply_budget_guard(state, update)

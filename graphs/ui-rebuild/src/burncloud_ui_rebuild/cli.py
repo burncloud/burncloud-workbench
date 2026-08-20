@@ -12,7 +12,7 @@ from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root
 from burncloud_ui_rebuild.graph import build_graph, initial_state
 from burncloud_ui_rebuild.notifications import telegram_check
 from burncloud_ui_rebuild.studio_supervisor import run_studio_supervisor
-from burncloud_ui_rebuild.worktree import current_branch
+from burncloud_ui_rebuild.worktree import current_branch, migrate_legacy_agent_worktree
 
 
 def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> None:
@@ -75,6 +75,9 @@ def main() -> None:
     sub.add_parser("telegram-check", help="Send one Telegram test notification using local environment secrets.")
     sub.add_parser("studio", help="Run langgraph dev under the Telegram-aware Studio supervisor.")
 
+    migrate = sub.add_parser("migrate-legacy-worktree", help="Move the previous Agent branch/worktree back into the primary BurnCloud checkout once.")
+    migrate.add_argument("--confirm", action="store_true", help="Required because dirty legacy changes may be temporarily stashed and restored.")
+
     rebuild = sub.add_parser("rebuild", help="Run the real v1 Scout→Plan→Build→Verify→Review graph.")
     rebuild.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
     rebuild.add_argument("--limit", type=int, default=1, help="Maximum pages for this bounded run.")
@@ -107,6 +110,13 @@ def main() -> None:
 
     if args.command == "studio":
         raise SystemExit(run_studio_supervisor())
+
+    if args.command == "migrate-legacy-worktree":
+        if not args.confirm:
+            parser.error("migrate-legacy-worktree requires --confirm")
+        result = migrate_legacy_agent_worktree(source_root())
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
 
     if args.command == "checkpoints":
         root = _current_agent_repo()

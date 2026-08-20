@@ -44,9 +44,9 @@ def _agent_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_graph_token_budget_allows_one_million_tokens():
-    assert DEFAULT_POLICY.max_page_tokens == 1_000_000
-    assert DEFAULT_POLICY.max_run_tokens == 1_000_000
+def test_graph_token_budget_allows_five_million_tokens():
+    assert DEFAULT_POLICY.max_page_tokens == 5_000_000
+    assert DEFAULT_POLICY.max_run_tokens == 5_000_000
 
 
 def test_normalization_never_hides_parent_traversal():

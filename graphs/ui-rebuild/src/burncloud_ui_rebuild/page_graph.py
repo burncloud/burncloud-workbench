@@ -15,7 +15,7 @@ from .engineering_nodes import (
 )
 from .notifications import error_notifying_node
 from .policy import DEFAULT_POLICY, blocking_findings
-from .quality_nodes import code_verifier, policy_fixer, policy_reviewer, reality_anchor
+from .quality_nodes import code_verifier, page_formatter, policy_fixer, policy_reviewer, reality_anchor
 from .state import Finding, UIRebuildState
 
 
@@ -25,6 +25,8 @@ PAGE_NODE_PLANNER = "修改计划"
 PAGE_NODE_PLAN_GUARD = "计划守卫"
 PAGE_NODE_BUILDER = "实施修改"
 PAGE_NODE_SCOPE_GUARD = "范围守卫"
+PAGE_NODE_FORMATTER = "确定性格式化"
+PAGE_NODE_POST_FORMAT_SCOPE = "格式化后范围复核"
 PAGE_NODE_CODE_VERIFY = "代码验证"
 PAGE_NODE_REALITY = "现实验证"
 PAGE_NODE_REVIEWER = "独立审查"
@@ -60,10 +62,10 @@ def _after_builder(state: UIRebuildState) -> str:
     return "范围检查"
 
 
-def _after_scope_guard(state: UIRebuildState) -> str:
+def _scope_failure_route(state: UIRebuildState) -> str:
     blockers = blocking_findings(state.get("verification_findings", []))
     if not blockers:
-        return "代码验证"
+        return ""
 
     # An unplanned page diff is first a planning mismatch, not a code-repair
     # problem. Give Planner a bounded chance to explicitly adopt or redesign the
@@ -76,6 +78,20 @@ def _after_scope_guard(state: UIRebuildState) -> str:
     ):
         return "重新规划"
     return "修复"
+
+
+def _after_scope_guard(state: UIRebuildState) -> str:
+    failure = _scope_failure_route(state)
+    return failure or "格式化"
+
+
+def _after_formatter(state: UIRebuildState) -> str:
+    return "修复" if blocking_findings(state.get("verification_findings", [])) else "范围复核"
+
+
+def _after_post_format_scope_guard(state: UIRebuildState) -> str:
+    failure = _scope_failure_route(state)
+    return failure or "代码验证"
 
 
 def _after_code_verification(state: UIRebuildState) -> str:
@@ -238,6 +254,8 @@ def build_page_graph():
     _add_safe_node(builder, PAGE_NODE_PLAN_GUARD, plan_guard_node)
     _add_safe_node(builder, PAGE_NODE_BUILDER, planned_builder_node)
     _add_safe_node(builder, PAGE_NODE_SCOPE_GUARD, scope_guard_node)
+    _add_safe_node(builder, PAGE_NODE_FORMATTER, page_formatter)
+    _add_safe_node(builder, PAGE_NODE_POST_FORMAT_SCOPE, scope_guard_node)
     _add_safe_node(builder, PAGE_NODE_CODE_VERIFY, code_verifier)
     _add_safe_node(builder, PAGE_NODE_REALITY, reality_anchor)
     _add_safe_node(builder, PAGE_NODE_REVIEWER, policy_reviewer)
@@ -271,6 +289,20 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_SCOPE_GUARD,
         _after_scope_guard,
+        {
+            "格式化": PAGE_NODE_FORMATTER,
+            "修复": PAGE_NODE_CAPTURE_FIX,
+            "重新规划": PAGE_NODE_PREPARE_REPLAN,
+        },
+    )
+    builder.add_conditional_edges(
+        PAGE_NODE_FORMATTER,
+        _after_formatter,
+        {"范围复核": PAGE_NODE_POST_FORMAT_SCOPE, "修复": PAGE_NODE_CAPTURE_FIX},
+    )
+    builder.add_conditional_edges(
+        PAGE_NODE_POST_FORMAT_SCOPE,
+        _after_post_format_scope_guard,
         {
             "代码验证": PAGE_NODE_CODE_VERIFY,
             "修复": PAGE_NODE_CAPTURE_FIX,

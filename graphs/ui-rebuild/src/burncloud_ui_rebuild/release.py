@@ -37,6 +37,40 @@ def _run(root: Path, argv: list[str], *, timeout: int = 120) -> str:
     return output
 
 
+def release_preflight(state: UIRebuildState) -> dict[str, Any]:
+    """Fail early if a successful run could not be published to GitHub later."""
+    if state.get("execution_mode", "dry_run") != "write":
+        return {"release_preflight": {"status": "dry_run"}, "phase": "release_preflight_skipped"}
+
+    root = Path(str(state.get("source_repo_root", ""))).resolve()
+    if not root.exists():
+        raise ReleaseError(f"BurnCloud source repo does not exist: {root}")
+    if shutil.which("gh") is None:
+        raise ReleaseError("GitHub CLI `gh` is required. Install it and run `gh auth login` before starting a write Graph.")
+
+    origin = _run(root, ["git", "remote", "get-url", "origin"], timeout=30).strip()
+    if not origin:
+        raise ReleaseError("Git remote `origin` is missing; completed runs cannot be pushed or submitted as PRs.")
+    if "github.com" not in origin.lower():
+        raise ReleaseError(f"Git remote `origin` is not a GitHub remote: {origin}")
+
+    # Do not persist auth output; it can contain account/scope details. Exit code is enough.
+    _run(root, ["gh", "auth", "status"], timeout=30)
+    return {
+        "release_preflight": {
+            "status": "ready",
+            "origin": origin,
+            "draft_pr": True,
+            "auto_merge": False,
+        },
+        "phase": "release_preflight_passed",
+    }
+
+
+def release_preflight_node(state: UIRebuildState) -> dict[str, Any]:
+    return release_preflight(state)
+
+
 def _ensure_publishable_branch(root: Path, expected_branch: str, base_branch: str) -> None:
     actual = current_branch(root)
     if actual != expected_branch:
@@ -160,7 +194,6 @@ def publish_pull_request(state: UIRebuildState) -> dict[str, Any]:
     if open_prs:
         selected = open_prs[0]
     elif merged_prs:
-        # A stale local main may not yet contain the merged commit. Never create a duplicate PR.
         selected = merged_prs[0]
         release_status = "pull_request_merged"
     elif closed_prs:

@@ -12,7 +12,9 @@ from burncloud_ui_rebuild.page_graph import (
     _after_builder,
     _after_code_verification,
     _after_fix,
+    _after_formatter,
     _after_plan_guard,
+    _after_post_format_scope_guard,
     _after_reality_anchor,
     _after_review,
     _after_scope_guard,
@@ -86,6 +88,15 @@ def test_scope_unplanned_files_replan_before_spending_fixer_rounds():
         "verification_findings": unplanned,
         "plan_round": DEFAULT_POLICY.max_plan_rounds,
     }) == "修复"
+    assert _after_post_format_scope_guard({"verification_findings": unplanned, "plan_round": 1}) == "重新规划"
+
+
+def test_deterministic_formatter_routes_through_post_format_scope_guard():
+    blocker = [{"severity": "blocker", "code": "RUSTFMT", "message": "parse failed"}]
+    assert _after_scope_guard({"verification_findings": [], "plan_round": 1}) == "格式化"
+    assert _after_formatter({"verification_findings": []}) == "范围复核"
+    assert _after_formatter({"verification_findings": blocker}) == "修复"
+    assert _after_post_format_scope_guard({"verification_findings": [], "plan_round": 1}) == "代码验证"
 
 
 def test_other_scope_and_deterministic_quality_failures_route_to_fixer():
@@ -95,7 +106,6 @@ def test_other_scope_and_deterministic_quality_failures_route_to_fixer():
     assert _after_scope_guard({"verification_findings": stale, "plan_round": 1}) == "修复"
     assert _after_code_verification({"verification_findings": blocker}) == "修复"
     assert _after_reality_anchor({"verification_findings": blocker}) == "修复"
-    assert _after_scope_guard({"verification_findings": [], "plan_round": 1}) == "代码验证"
     assert _after_code_verification({"verification_findings": []}) == "现实验证"
     assert _after_reality_anchor({"verification_findings": []}) == "审查"
 

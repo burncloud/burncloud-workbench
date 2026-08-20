@@ -11,14 +11,12 @@ from burncloud_ui_rebuild.nodes import (
     mark_page_complete,
     permission_guardian,
     prepare_worktree,
-    release_agent,
     repo_scout,
     select_next_page,
     spec_agent,
     write_preflight,
 )
 from burncloud_ui_rebuild.notifications import (
-    completion_notification,
     error_notifying_node,
     human_review_notification,
     recovery_review_notification,
@@ -27,6 +25,7 @@ from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.policy import DEFAULT_POLICY
 from burncloud_ui_rebuild.quality_nodes import human_review_gate, page_checkpoint
 from burncloud_ui_rebuild.recovery_gate import recovery_confirmation_gate
+from burncloud_ui_rebuild.release import publish_pull_request_node, pull_request_completion_notification
 from burncloud_ui_rebuild.state import UIRebuildState
 
 
@@ -49,7 +48,7 @@ NODE_MARK_COMPLETE = "标记页面完成"
 NODE_FINAL_PERMISSION = "最终质量检查"
 NODE_HUMAN_NOTIFY = "人工审核通知"
 NODE_HUMAN_GATE = "人工审批"
-NODE_RELEASE = "发布"
+NODE_RELEASE = "提交 Pull Request"
 NODE_COMPLETION_NOTIFY = "完成通知"
 
 
@@ -60,6 +59,14 @@ def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
         "max_fix_rounds": state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds),
         "start_new_task": bool(state.get("start_new_task", False)),
     }
+
+
+def _branch_router(state: UIRebuildState) -> str:
+    # A prior successful run may be restarted before its PR is merged. Do not
+    # rebuild the page again; idempotently push/reuse/create the same PR.
+    if state.get("branch_task_status") in {"completed_unintegrated", "awaiting_pr_merge"}:
+        return "提交PR"
+    return "继续工程"
 
 
 def _page_router(state: UIRebuildState) -> str:
@@ -110,8 +117,8 @@ def build_graph(checkpointer=None):
     _add_safe_node(builder, NODE_FINAL_PERMISSION, final_quality_check)
     builder.add_node(NODE_HUMAN_NOTIFY, human_review_notification)
     builder.add_node(NODE_HUMAN_GATE, human_review_gate)
-    _add_safe_node(builder, NODE_RELEASE, release_agent)
-    builder.add_node(NODE_COMPLETION_NOTIFY, completion_notification)
+    _add_safe_node(builder, NODE_RELEASE, publish_pull_request_node)
+    builder.add_node(NODE_COMPLETION_NOTIFY, pull_request_completion_notification)
 
     builder.add_edge(START, NODE_DEFAULT_MODE)
     builder.add_edge(NODE_DEFAULT_MODE, NODE_BOOTSTRAP)
@@ -119,7 +126,11 @@ def build_graph(checkpointer=None):
     builder.add_edge(NODE_SPEC, NODE_SCOUT)
     builder.add_edge(NODE_SCOUT, NODE_PERMISSION)
     builder.add_edge(NODE_PERMISSION, NODE_WORKTREE)
-    builder.add_edge(NODE_WORKTREE, NODE_PREFLIGHT)
+    builder.add_conditional_edges(
+        NODE_WORKTREE,
+        _branch_router,
+        {"继续工程": NODE_PREFLIGHT, "提交PR": NODE_RELEASE},
+    )
     builder.add_edge(NODE_PREFLIGHT, NODE_RUN_CONTEXT)
     builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY_NOTIFY)
     builder.add_edge(NODE_RECOVERY_NOTIFY, NODE_RECOVERY_GATE)

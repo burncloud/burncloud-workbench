@@ -25,15 +25,14 @@ def recovery_confirmation_gate(state: UIRebuildState) -> dict[str, Any]:
         "type": "burncloud_graph_engineering_v1_recovery_gate",
         "target_commit": target,
         "agent_branch": state.get("agent_branch", ""),
-        "worktree_root": state.get("worktree_root", ""),
-        "warning": "Recovery resets tracked Agent-worktree changes to the selected known page checkpoint. Untracked files are preserved.",
+        "source_repo_root": state.get("source_repo_root", ""),
+        "warning": "Recovery resets tracked changes on the current Agent branch to the selected known page checkpoint. Untracked files are preserved.",
         "question": "Approve recovery to this page checkpoint before continuing the run?",
     })
     if bool(decision):
         request["confirmed"] = True
         return {"recovery_request": request}
 
-    # Declining recovery means continue from current Agent HEAD, not half-execute the request.
     return {
         "recovery_request": {},
         "recovery_result": {

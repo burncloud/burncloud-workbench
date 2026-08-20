@@ -56,7 +56,21 @@ def _after_builder(state: UIRebuildState) -> str:
 
 
 def _after_scope_guard(state: UIRebuildState) -> str:
-    return "修复" if blocking_findings(state.get("verification_findings", [])) else "代码验证"
+    blockers = blocking_findings(state.get("verification_findings", []))
+    if not blockers:
+        return "代码验证"
+
+    # An unplanned page diff is first a planning mismatch, not a code-repair
+    # problem. Give Planner a bounded chance to explicitly adopt or redesign the
+    # scope before spending Fixer rounds. Other scope failures (for example stale
+    # retry carry-over) remain Fixer-owned cleanup work.
+    codes = {str(item.get("code", "")) for item in blockers}
+    if (
+        "SCOPE_GUARD_UNPLANNED_FILES" in codes
+        and int(state.get("plan_round", 0)) < DEFAULT_POLICY.max_plan_rounds
+    ):
+        return "重新规划"
+    return "修复"
 
 
 def _after_code_verification(state: UIRebuildState) -> str:
@@ -215,7 +229,11 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_SCOPE_GUARD,
         _after_scope_guard,
-        {"代码验证": PAGE_NODE_CODE_VERIFY, "修复": PAGE_NODE_CAPTURE_FIX},
+        {
+            "代码验证": PAGE_NODE_CODE_VERIFY,
+            "修复": PAGE_NODE_CAPTURE_FIX,
+            "重新规划": PAGE_NODE_PREPARE_REPLAN,
+        },
     )
     builder.add_conditional_edges(
         PAGE_NODE_CODE_VERIFY,

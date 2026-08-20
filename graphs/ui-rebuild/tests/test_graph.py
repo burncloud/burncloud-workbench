@@ -85,11 +85,15 @@ def test_scope_and_deterministic_quality_failures_route_to_fixer():
     assert _after_reality_anchor({"verification_findings": []}) == "审查"
 
 
-def test_exhausted_or_blocked_fix_routes_to_human_intervention():
+def test_fix_routing_replans_once_then_escalates():
     assert _after_fix({"current_page_status": "fix_exhausted"}) == "人工介入"
-    assert _after_fix({"current_page_status": "fix_blocked"}) == "人工介入"
     assert _after_fix({"current_page_status": "budget_exhausted"}) == "人工介入"
     assert _after_fix({"current_page_status": "fix_applied"}) == "重新检查范围"
+    assert _after_fix({"current_page_status": "fix_blocked", "plan_round": 1}) == "重新规划"
+    assert _after_fix({
+        "current_page_status": "fix_blocked",
+        "plan_round": DEFAULT_POLICY.max_plan_rounds,
+    }) == "人工介入"
 
 
 def test_fix_context_is_preserved_when_fixer_blocks():

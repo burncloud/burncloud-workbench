@@ -11,6 +11,7 @@ from functools import wraps
 from typing import Any, Callable
 
 from .state import UIRebuildState
+from .task_store import save_task_snapshot
 
 
 TELEGRAM_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
@@ -54,11 +55,7 @@ def _release_event(event_key: str) -> None:
 
 
 def send_telegram_message(text: str, *, event_key: str = "", force: bool = False) -> dict[str, Any]:
-    """Best-effort Telegram Bot API notification with bounded transient retries.
-
-    Notification failure must never fail the Graph. Secrets are read only from the
-    local environment and are never returned in the result.
-    """
+    """Best-effort Telegram Bot API notification with bounded transient retries."""
     token = os.environ.get(TELEGRAM_BOT_TOKEN_ENV, "").strip()
     chat_id = os.environ.get(TELEGRAM_CHAT_ID_ENV, "").strip()
     if not token or not chat_id:
@@ -86,41 +83,21 @@ def send_telegram_message(text: str, *, event_key: str = "", force: bool = False
                 body = response.read().decode("utf-8", errors="replace")
             parsed = json.loads(body) if body else {}
             if status_code >= 400 or not bool(parsed.get("ok", False)):
-                last_failure = {
-                    "status": "failed",
-                    "http_status": status_code,
-                    "reason": "telegram_api_rejected",
-                    "attempts": attempt,
-                }
+                last_failure = {"status": "failed", "http_status": status_code, "reason": "telegram_api_rejected", "attempts": attempt}
                 break
-            return {
-                "status": "sent",
-                "http_status": status_code,
-                "event_key": event_key,
-                "attempts": attempt,
-            }
+            return {"status": "sent", "http_status": status_code, "event_key": event_key, "attempts": attempt}
         except urllib.error.HTTPError as exc:
-            last_failure = {
-                "status": "failed",
-                "http_status": int(exc.code),
-                "reason": "telegram_http_error",
-                "attempts": attempt,
-            }
+            last_failure = {"status": "failed", "http_status": int(exc.code), "reason": "telegram_http_error", "attempts": attempt}
             transient = int(exc.code) == 429 or int(exc.code) >= 500
             if not transient or attempt >= TELEGRAM_MAX_ATTEMPTS:
                 break
-        except Exception as exc:  # notification transport must never break the delivery graph
-            last_failure = {
-                "status": "failed",
-                "reason": f"{type(exc).__name__}: {_redact(str(exc))}",
-                "attempts": attempt,
-            }
+        except Exception as exc:
+            last_failure = {"status": "failed", "reason": f"{type(exc).__name__}: {_redact(str(exc))}", "attempts": attempt}
             if attempt >= TELEGRAM_MAX_ATTEMPTS:
                 break
         time.sleep(0.5 * attempt)
 
     if claimed:
-        # A failed delivery may be retried by a later Graph attempt.
         _release_event(event_key)
     return last_failure
 
@@ -157,14 +134,26 @@ def notify_graph_error(state: UIRebuildState, node_name: str, exc: BaseException
 
 
 def error_notifying_node(node_name: str, node: Callable[[UIRebuildState], dict[str, Any]]):
-    """Wrap a normal node with a Telegram error boundary and re-raise the original error."""
+    """Add one error boundary and one compact safe-node Task checkpoint.
+
+    The checkpoint happens only after a node returns successfully. If the node
+    crashes, the previous safe snapshot remains the recovery point and the error is
+    still surfaced through Telegram/LangGraph.
+    """
     @wraps(node)
     def wrapped(state: UIRebuildState):
         try:
-            return node(state)
+            update = node(state)
+            merged = dict(state)
+            if isinstance(update, dict):
+                merged.update(update)
+                checkpoint = save_task_snapshot(merged, safe_node=node_name)
+                if checkpoint.get("status") == "saved":
+                    update = dict(update)
+                    update["task_snapshot"] = checkpoint
+                    update["task_total_tokens"] = int(checkpoint.get("task_total_tokens", 0) or 0)
+            return update
         except BaseException as exc:
-            # LangGraph interrupt is control flow, not an error. Interrupt nodes are
-            # intentionally left unwrapped; this guard also protects future refactors.
             if type(exc).__name__ in {"GraphInterrupt", "NodeInterrupt"}:
                 raise
             notify_graph_error(state, node_name, exc)
@@ -202,10 +191,7 @@ def human_review_notification(state: UIRebuildState) -> dict[str, Any]:
 
     thread_id = str(state.get("thread_id", "unknown"))
     page_id = _page_id(state) or "-"
-    blockers = [
-        item for item in state.get("final_findings", [])
-        if str(item.get("severity", "")).lower() in {"blocker", "major"}
-    ]
+    blockers = [item for item in state.get("final_findings", []) if str(item.get("severity", "")).lower() in {"blocker", "major"}]
     if blockers:
         first = blockers[0]
         first_reason = f"{first.get('code', 'UNKNOWN')}: {first.get('message', '')}"

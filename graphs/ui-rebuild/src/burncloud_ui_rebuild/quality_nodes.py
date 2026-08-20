@@ -5,17 +5,46 @@ from typing import Any
 
 from langgraph.types import interrupt
 
-from .coding_tools import changed_source_files, create_page_checkpoint, run_named_validation
+from .coding_tools import normalize_repo_path, run_named_validation
 from .engineering_agents import run_v1_fixer_agent, run_v1_reviewer_agent
 from .engineering_nodes import accumulate_usage, apply_budget_guard
+from .git_state import changed_source_files, create_scoped_page_checkpoint, page_changed_files_since_baseline
 from .policy import DEFAULT_POLICY, blocking_findings
 from .state import Finding, UIRebuildState
+
+
+def _allowed_files(state: UIRebuildState) -> set[str]:
+    return {
+        normalize_repo_path(str(path))
+        for path in state.get("implementation_plan", {}).get("allowed_files", [])
+    }
 
 
 def _changed_files(state: UIRebuildState) -> list[str]:
     if state.get("execution_mode", "dry_run") != "write":
         return []
-    return changed_source_files(state["source_repo_root"])
+    current_dirty = set(changed_source_files(state["source_repo_root"]))
+    return sorted(current_dirty & _allowed_files(state))
+
+
+def _restore_scope(state: UIRebuildState) -> list[str]:
+    """Dirty files Fixer may discard without gaining edit permission.
+
+    Relevant carry-over is protected by Planner putting it in allowed_files. Only
+    unplanned page-local pollution and unplanned retry carry-over may be restored.
+    """
+    if state.get("execution_mode", "dry_run") != "write":
+        return []
+    allowed = _allowed_files(state)
+    page_context = dict(state.get("page_context", {}))
+    baseline_dirty = set(page_context.get("baseline_dirty_files", []))
+    baseline_fingerprints = dict(page_context.get("baseline_dirty_fingerprints", {}))
+    current_dirty = set(changed_source_files(state["source_repo_root"]))
+    page_delta = set(page_changed_files_since_baseline(state["source_repo_root"], baseline_fingerprints))
+    cleaned_carryover = baseline_dirty - current_dirty
+    page_pollution = (page_delta - allowed) - cleaned_carryover
+    stale_carryover = (current_dirty & baseline_dirty) - allowed
+    return sorted(page_pollution | stale_carryover)
 
 
 def code_verifier(state: UIRebuildState) -> dict[str, Any]:
@@ -125,7 +154,7 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
     if page is None:
         return {"fix_round": current}
 
-    dirty_files = _changed_files(state)
+    restore_files = _restore_scope(state)
     report = run_v1_fixer_agent(
         model_name=state["model_name"],
         source_root=state["source_repo_root"],
@@ -135,7 +164,7 @@ def policy_fixer(state: UIRebuildState) -> dict[str, Any]:
         implementation_plan=state.get("implementation_plan", {}),
         verification_findings=list(state.get("verification_findings", [])),
         review_findings=list(state.get("review_findings", [])),
-        restore_files=dirty_files,
+        restore_files=restore_files,
     )
     usage = dict(report.pop("_usage", {}))
     status = "fix_applied" if report["status"] == "COMPLETE" else "fix_blocked"
@@ -159,7 +188,8 @@ def page_checkpoint(state: UIRebuildState) -> dict[str, Any]:
     if state.get("execution_mode", "dry_run") != "write":
         return {"page_checkpoint": {"status": "dry_run", "page_id": page["id"]}}
 
-    checkpoint = create_page_checkpoint(state["source_repo_root"], page["id"])
+    checkpoint_files = list(state.get("page_checkpoint_files", [])) or _changed_files(state)
+    checkpoint = create_scoped_page_checkpoint(state["source_repo_root"], page["id"], checkpoint_files)
     history = list(state.get("page_checkpoint_history", []))
     history.append(checkpoint)
     page_context = dict(state.get("page_context", {}))
@@ -210,6 +240,8 @@ def human_review_gate(state: UIRebuildState) -> dict[str, Any]:
         "review_findings": state.get("review_findings", []),
         "validation_results": state.get("validation_results", []),
         "reality_report": state.get("reality_report", {}),
+        "page_changed_files": state.get("page_changed_files", []),
+        "page_checkpoint_files": state.get("page_checkpoint_files", []),
         "page_checkpoint": state.get("page_checkpoint", {}),
         "page_checkpoint_history": state.get("page_checkpoint_history", []),
         "completed_pages": len(state.get("completed_pages", [])),

@@ -4,6 +4,7 @@ from langgraph.types import Command
 from burncloud_ui_rebuild.graph import (
     _after_page_rebuild,
     _branch_router,
+    _final_gate_router,
     build_graph,
     default_execution_mode,
     initial_state,
@@ -51,7 +52,17 @@ def test_completed_unintegrated_branch_routes_directly_to_pr_release():
 def test_page_entry_resumes_from_compact_task_stage():
     assert _after_page_entry({"resume_page_stage": "fresh"}) == "新页面"
     assert _after_page_entry({"resume_page_stage": "plan"}) == "继续规划"
+    assert _after_page_entry({"resume_page_stage": "build"}) == "继续施工"
     assert _after_page_entry({"resume_page_stage": "validate"}) == "安全验证"
+
+
+def test_autopilot_only_bypasses_clean_final_human_gate():
+    assert _final_gate_router({"autopilot_mode": True, "final_findings": []}) == "自动批准"
+    assert _final_gate_router({"autopilot_mode": False, "final_findings": []}) == "人工审核"
+    assert _final_gate_router({
+        "autopilot_mode": True,
+        "final_findings": [{"severity": "blocker", "code": "STOP", "message": "needs human"}],
+    }) == "人工审核"
 
 
 def test_v1_scout_plan_builder_routing():

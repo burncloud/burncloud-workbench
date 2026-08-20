@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
+
 from langgraph.graph import END, START, StateGraph
 
+from .coding_tools import normalize_repo_path
 from .engineering_nodes import (
     page_scout_node,
     plan_guard_node,
@@ -29,6 +32,8 @@ PAGE_NODE_CAPTURE_FIX = "保存失败上下文"
 PAGE_NODE_FIXER = "修复"
 PAGE_NODE_FINALIZE_FIX = "整理修复结果"
 PAGE_NODE_PREPARE_REPLAN = "准备重新规划"
+
+_REPO_FILE_RE = re.compile(r"crates/client/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+")
 
 
 def _after_scout(state: UIRebuildState) -> str:
@@ -81,10 +86,46 @@ def _after_reality_anchor(state: UIRebuildState) -> str:
     return "修复" if blocking_findings(state.get("verification_findings", [])) else "审查"
 
 
+def _finding_repo_files(findings: list[dict[str, object]]) -> set[str]:
+    """Extract concrete writable client files cited by structured findings.
+
+    Reviewer evidence frequently contains locations such as
+    `crates/client/src/app.rs:18-60`. A finding that proves correction requires a
+    client file outside the approved allowlist is a planning mismatch; sending it
+    to Fixer cannot work because Fixer is intentionally forbidden from expanding
+    its own edit scope.
+    """
+    paths: set[str] = set()
+    for item in findings:
+        text = "\n".join(
+            str(item.get(field, ""))
+            for field in ("message", "evidence", "expected")
+        )
+        for match in _REPO_FILE_RE.findall(text):
+            paths.add(normalize_repo_path(match))
+    return paths
+
+
+def _review_requires_replan(state: UIRebuildState, blockers: list[dict[str, object]]) -> bool:
+    if int(state.get("plan_round", 0)) >= DEFAULT_POLICY.max_plan_rounds:
+        return False
+    allowed = {
+        normalize_repo_path(str(path))
+        for path in state.get("implementation_plan", {}).get("allowed_files", [])
+    }
+    cited = _finding_repo_files(blockers)
+    return bool(cited - allowed)
+
+
 def _after_review(state: UIRebuildState) -> str:
     if state.get("current_page_status") == "budget_exhausted":
         return "人工介入"
-    return "修复" if blocking_findings(state.get("review_findings", [])) else "完成"
+    blockers = list(blocking_findings(state.get("review_findings", [])))
+    if not blockers:
+        return "完成"
+    if _review_requires_replan(state, blockers):
+        return "重新规划"
+    return "修复"
 
 
 def _capture_fix_context(state: UIRebuildState) -> dict[str, object]:
@@ -140,10 +181,10 @@ def _after_fix(state: UIRebuildState) -> str:
 def _prepare_replan(state: UIRebuildState) -> dict[str, object]:
     """Turn unresolved quality blockers into deterministic Planner feedback.
 
-    Fixer never gains permission to expand its own file scope. If it cannot solve
-    a blocker inside the approved plan, the graph gives Planner one bounded chance
-    to revise the plan. Old quality findings are preserved in last_* fields but
-    cleared from the active validation state so they do not poison the new plan.
+    Fixer never gains permission to expand its own file scope. If a blocker cannot
+    be solved inside the approved plan, the graph gives Planner one bounded chance
+    to revise the plan. A new plan gets a fresh Fixer budget; plan_round bounds
+    scope evolution while fix_round bounds repairs inside one approved plan.
     """
     verification = list(state.get("verification_findings") or state.get("last_verification_findings", []))
     review = list(state.get("review_findings") or state.get("last_review_findings", []))
@@ -179,6 +220,7 @@ def _prepare_replan(state: UIRebuildState) -> dict[str, object]:
         "plan_findings": plan_findings,
         "verification_findings": [],
         "review_findings": [],
+        "fix_round": 0,
         "current_page_status": "replan_requested",
         "last_failure_reason": state.get("last_failure_reason", ""),
     }
@@ -248,7 +290,12 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_REVIEWER,
         _after_review,
-        {"完成": END, "修复": PAGE_NODE_CAPTURE_FIX, "人工介入": END},
+        {
+            "完成": END,
+            "修复": PAGE_NODE_CAPTURE_FIX,
+            "重新规划": PAGE_NODE_PREPARE_REPLAN,
+            "人工介入": END,
+        },
     )
     builder.add_edge(PAGE_NODE_CAPTURE_FIX, PAGE_NODE_FIXER)
     builder.add_edge(PAGE_NODE_FIXER, PAGE_NODE_FINALIZE_FIX)

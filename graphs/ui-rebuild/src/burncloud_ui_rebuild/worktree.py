@@ -92,7 +92,7 @@ def agent_branch_is_completed(repo_root: str | Path, branch: str | None = None) 
 
 
 def _listed_worktrees(root: Path) -> list[dict[str, str]]:
-    """Read legacy linked worktrees only for one-time migration detection."""
+    """Read linked worktrees only for one-time migration detection."""
     output = _git(root, "worktree", "list", "--porcelain")
     records: list[dict[str, str]] = []
     current: dict[str, str] = {}
@@ -117,8 +117,8 @@ def _listed_worktrees(root: Path) -> list[dict[str, str]]:
     return records
 
 
-def find_legacy_agent_worktree(base_repo_root: str | Path) -> dict[str, str] | None:
-    """Return the newest linked legacy Agent worktree, excluding the primary checkout."""
+def list_legacy_agent_worktrees(base_repo_root: str | Path) -> list[dict[str, str]]:
+    """Return linked legacy UI rebuild worktrees, newest branch first."""
     root = Path(base_repo_root).resolve()
     candidates: list[dict[str, str]] = []
     for record in _listed_worktrees(root):
@@ -134,71 +134,106 @@ def find_legacy_agent_worktree(base_repo_root: str | Path) -> dict[str, str] | N
         if path == root or not path.exists():
             continue
         candidates.append({"agent_branch": branch, "legacy_worktree_root": str(path)})
-    if not candidates:
-        return None
     candidates.sort(key=lambda item: item["agent_branch"], reverse=True)
-    return candidates[0]
+    return candidates
+
+
+def find_legacy_agent_worktree(base_repo_root: str | Path) -> dict[str, str] | None:
+    """Return the newest linked legacy Agent worktree, if any."""
+    candidates = list_legacy_agent_worktrees(base_repo_root)
+    return candidates[0] if candidates else None
+
+
+def _stash_legacy_worktree(worktree_root: Path, branch: str) -> dict[str, Any]:
+    status = porcelain_status(worktree_root)
+    if not status:
+        return {"dirty": False, "stash_commit": ""}
+
+    _git(
+        worktree_root,
+        "stash",
+        "push",
+        "-u",
+        "-m",
+        f"burncloud-harness-legacy-migration:{branch}",
+        timeout=120,
+    )
+    if porcelain_status(worktree_root):
+        raise WorktreeError(
+            f"Legacy worktree {worktree_root} is still dirty after migration stash; refusing to remove it."
+        )
+    stash_commit = _git(worktree_root, "rev-parse", "refs/stash", timeout=30).strip()
+    return {"dirty": True, "stash_commit": stash_commit}
 
 
 def migrate_legacy_agent_worktree(base_repo_root: str | Path) -> dict[str, Any]:
-    """Move the newest old Agent worktree back into the primary checkout.
+    """Retire every old linked Agent worktree and resume the newest branch in-place.
 
-    This is an explicit one-time migration operation. Dirty tracked/untracked
-    work is preserved with a temporary Git stash, the linked worktree is
-    removed, the primary checkout switches to the same Agent branch, and the
-    stash is restored there. Ignored build artifacts such as target/ are never
-    stashed, which is intentional because the primary checkout keeps its own
-    persistent Cargo cache.
+    The newest legacy branch is treated as the current task. Its tracked/untracked
+    dirty changes are temporarily stashed, the linked worktree is removed, the
+    primary BurnCloud checkout switches to that same branch, and the stash is
+    restored there.
+
+    Older legacy worktrees are retired too. If they contain dirty work, that work
+    is preserved as Git stashes and reported in `archived_legacy_tasks`; it is not
+    mixed into the current task. Ignored build artifacts such as target/ are not
+    stashed and are intentionally discarded with old worktrees because the new
+    branch-only workflow keeps one persistent target/ under the primary checkout.
     """
     root = Path(base_repo_root).resolve()
-    legacy = find_legacy_agent_worktree(root)
-    if legacy is None:
-        return {"status": "no_legacy_agent_worktree", "source_repo_root": str(root)}
+    legacies = list_legacy_agent_worktrees(root)
+    if not legacies:
+        return {
+            "status": "no_legacy_agent_worktree",
+            "source_repo_root": str(root),
+            "archived_legacy_tasks": [],
+        }
 
     if current_branch(root) != "main":
         raise WorktreeError("Legacy worktree migration requires the primary BurnCloud checkout to be on 'main'.")
     if porcelain_status(root):
         raise WorktreeError("Primary BurnCloud checkout must be clean before legacy worktree migration.")
 
-    legacy_root = Path(legacy["legacy_worktree_root"]).resolve()
-    branch = _validate_branch_name(legacy["agent_branch"])
-    legacy_status = porcelain_status(legacy_root)
-    stash_created = False
+    active = legacies[0]
+    archived: list[dict[str, Any]] = []
 
-    if legacy_status:
-        before = _git(legacy_root, "stash", "list", "--format=%gd", timeout=60).splitlines()
-        _git(
-            legacy_root,
-            "stash",
-            "push",
-            "-u",
-            "-m",
-            f"burncloud-harness-legacy-migration:{branch}",
-            timeout=120,
-        )
-        after = _git(legacy_root, "stash", "list", "--format=%gd", timeout=60).splitlines()
-        stash_created = bool(after and after != before)
-        if porcelain_status(legacy_root):
-            raise WorktreeError("Legacy worktree is still dirty after migration stash; refusing to remove it.")
+    # Retire older worktrees first so the active task's stash is created last and
+    # can be restored deterministically as stash@{0}.
+    for legacy in reversed(legacies[1:]):
+        legacy_root = Path(legacy["legacy_worktree_root"]).resolve()
+        branch = _validate_branch_name(legacy["agent_branch"])
+        stash = _stash_legacy_worktree(legacy_root, branch)
+        _git(root, "worktree", "remove", str(legacy_root), timeout=180)
+        archived.append({
+            "agent_branch": branch,
+            "legacy_worktree_root": str(legacy_root),
+            "dirty_changes_preserved": bool(stash["dirty"]),
+            "stash_commit": str(stash["stash_commit"]),
+        })
 
-    _git(root, "worktree", "remove", str(legacy_root), timeout=120)
-    _git(root, "switch", branch, timeout=120)
+    active_root = Path(active["legacy_worktree_root"]).resolve()
+    active_branch = _validate_branch_name(active["agent_branch"])
+    active_stash = _stash_legacy_worktree(active_root, active_branch)
+    _git(root, "worktree", "remove", str(active_root), timeout=180)
+    _git(root, "switch", active_branch, timeout=120)
     _clear_completed_branch(root)
 
-    if stash_created:
+    if active_stash["dirty"]:
         code, output = _run_git(root, "stash", "pop", "stash@{0}", timeout=120, check=False)
         if code != 0:
             raise WorktreeError(
-                "Legacy worktree branch was adopted into the primary checkout, but restoring its temporary stash "
-                f"reported conflicts. Resolve them on {branch!r}; the stash is preserved by Git. Output:\n{output}"
+                "Legacy active branch was adopted into the primary checkout, but restoring its temporary stash "
+                f"reported conflicts. Resolve them on {active_branch!r}; Git preserves conflicted stash data. Output:\n{output}"
             )
 
     return {
         "status": "migrated",
-        "agent_branch": branch,
+        "agent_branch": active_branch,
         "source_repo_root": str(root),
-        "legacy_worktree_root": str(legacy_root),
-        "restored_dirty_changes": stash_created,
+        "legacy_worktree_root": str(active_root),
+        "restored_dirty_changes": bool(active_stash["dirty"]),
+        "archived_legacy_tasks": archived,
+        "remaining_legacy_worktrees": len(list_legacy_agent_worktrees(root)),
     }
 
 
@@ -229,6 +264,7 @@ def _create_agent_branch(root: Path, *, base_branch: str) -> dict[str, Any]:
         "agent_branch": agent_branch,
         "source_repo_root": str(root),
         "branch_reused": False,
+        # Compatibility fields: no worktree is created. Both roots are the one checkout.
         "worktree_root": str(root),
         "worktree_reused": False,
     }
@@ -309,10 +345,9 @@ def prepare_agent_worktree(
         legacy = find_legacy_agent_worktree(root)
         if legacy is not None:
             raise WorktreeError(
-                "A legacy Agent worktree still owns the previous UI rebuild branch. "
-                "To preserve retry continuity, run `burncloud-ui-rebuild migrate-legacy-worktree --confirm` once "
-                "before starting the new single-checkout branch workflow. "
-                f"Legacy branch={legacy['agent_branch']} path={legacy['legacy_worktree_root']}"
+                "Legacy Agent worktrees still exist. To preserve retry continuity and retire all linked worktrees, "
+                "run `burncloud-ui-rebuild migrate-legacy-worktree --confirm` once before starting branch-only mode. "
+                f"Newest legacy branch={legacy['agent_branch']} path={legacy['legacy_worktree_root']}"
             )
         return _create_agent_branch(root, base_branch=base_branch)
 

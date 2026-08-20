@@ -18,9 +18,11 @@ def test_deep_repository_agent_budgets_are_expanded():
     assert DEFAULT_POLICY.fixer_budget.max_tool_calls == 240
 
 
-def test_graph_token_budget_is_five_million():
+def test_run_and_task_token_budgets_are_layered():
     assert DEFAULT_POLICY.max_page_tokens == 5_000_000
     assert DEFAULT_POLICY.max_run_tokens == 5_000_000
+    assert DEFAULT_POLICY.max_task_tokens == 15_000_000
+    assert DEFAULT_POLICY.max_continuation_runs == 4
 
 
 def test_restore_cleanup_budget_is_independent_from_edit_budget():

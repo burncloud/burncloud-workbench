@@ -54,15 +54,9 @@ def release_preflight(state: UIRebuildState) -> dict[str, Any]:
     if "github.com" not in origin.lower():
         raise ReleaseError(f"Git remote `origin` is not a GitHub remote: {origin}")
 
-    # Do not persist auth output; it can contain account/scope details. Exit code is enough.
     _run(root, ["gh", "auth", "status"], timeout=30)
     return {
-        "release_preflight": {
-            "status": "ready",
-            "origin": origin,
-            "draft_pr": True,
-            "auto_merge": False,
-        },
+        "release_preflight": {"status": "ready", "origin": origin, "draft_pr": True, "auto_merge": False},
         "phase": "release_preflight_passed",
     }
 
@@ -101,7 +95,7 @@ def _pr_body(*, branch: str, base_branch: str, pages: list[str], diff_stat: str)
     return "\n".join([
         "## BurnCloud Graph Engineering Harness v1",
         "",
-        "This Draft PR was created automatically after the bounded Graph completed and passed the Human Gate.",
+        "This Draft PR was created automatically after the bounded Graph completed and passed its final policy gate.",
         "",
         f"- Base: `{base_branch}`",
         f"- Agent branch: `{branch}`",
@@ -115,23 +109,19 @@ def _pr_body(*, branch: str, base_branch: str, pages: list[str], diff_stat: str)
         diff_stat or "No diff stat available.",
         "```",
         "",
-        "The Harness only publishes after deterministic code/reality checks and independent review. Final merge remains a separate human-controlled action.",
+        "The Harness only publishes after deterministic code/reality checks and independent review. Autopilot may approve a clean final gate; blockers still require a human. Final merge remains human-controlled.",
     ])
 
 
 def _list_matching_prs(root: Path, branch: str, base_branch: str) -> list[dict[str, Any]]:
-    output = _run(
-        root,
-        [
-            "gh", "pr", "list",
-            "--head", branch,
-            "--base", base_branch,
-            "--state", "all",
-            "--json", "number,url,title,state,isDraft",
-            "--limit", "20",
-        ],
-        timeout=60,
-    )
+    output = _run(root, [
+        "gh", "pr", "list",
+        "--head", branch,
+        "--base", base_branch,
+        "--state", "all",
+        "--json", "number,url,title,state,isDraft",
+        "--limit", "20",
+    ], timeout=60)
     try:
         parsed = json.loads(output or "[]")
     except json.JSONDecodeError as exc:
@@ -140,11 +130,7 @@ def _list_matching_prs(root: Path, branch: str, base_branch: str) -> list[dict[s
 
 
 def _view_pr(root: Path, pr_number: int) -> dict[str, Any]:
-    output = _run(
-        root,
-        ["gh", "pr", "view", str(pr_number), "--json", "number,url,title,state,isDraft"],
-        timeout=60,
-    )
+    output = _run(root, ["gh", "pr", "view", str(pr_number), "--json", "number,url,title,state,isDraft"], timeout=60)
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError as exc:
@@ -180,7 +166,6 @@ def publish_pull_request(state: UIRebuildState) -> dict[str, Any]:
     pages = [str(item.get("page_id", "")) for item in checkpoints if item.get("page_id")]
     diff_stat = _run(root, ["git", "diff", "--stat", f"{base_branch}...{branch}"], timeout=30)
 
-    # Never force-push. Divergence or permission problems fail closed and are surfaced by the Graph error boundary.
     _run(root, ["git", "push", "--set-upstream", "origin", branch], timeout=300)
 
     existing = _list_matching_prs(root, branch, base_branch)
@@ -205,18 +190,14 @@ def publish_pull_request(state: UIRebuildState) -> dict[str, Any]:
     else:
         title = _pr_title(pages)
         body = _pr_body(branch=branch, base_branch=base_branch, pages=pages, diff_stat=diff_stat)
-        created_output = _run(
-            root,
-            [
-                "gh", "pr", "create",
-                "--draft",
-                "--base", base_branch,
-                "--head", branch,
-                "--title", title,
-                "--body", body,
-            ],
-            timeout=120,
-        )
+        created_output = _run(root, [
+            "gh", "pr", "create",
+            "--draft",
+            "--base", base_branch,
+            "--head", branch,
+            "--title", title,
+            "--body", body,
+        ], timeout=120)
         match = re.search(r"https://github\.com/[^\s]+/pull/(\d+)", created_output)
         if not match:
             matches = _list_matching_prs(root, branch, base_branch)
@@ -262,14 +243,16 @@ def pull_request_completion_notification(state: UIRebuildState) -> dict[str, Any
     url = str(state.get("pull_request_url", ""))
     number = int(state.get("pull_request_number", 0) or 0)
     branch = str(state.get("agent_branch", ""))
-    usage = dict(state.get("budget_usage", {}))
+    task_tokens = int(state.get("task_total_tokens", 0) or 0)
+    if task_tokens <= 0:
+        task_tokens = int(state.get("budget_usage", {}).get("total_tokens", 0) or 0)
     result = send_telegram_message(
         "\n".join([
             "✅ BurnCloud Harness 任务完成并已提交 Pull Request",
             f"PR: #{number}",
             f"链接: {url}",
             f"分支: {branch}",
-            f"Token: {usage.get('total_tokens', 0)}",
+            f"Task Token: {task_tokens}",
             f"Thread: {thread_id}",
             "状态: Draft PR 已创建/复用；不会自动 merge main。",
         ]),

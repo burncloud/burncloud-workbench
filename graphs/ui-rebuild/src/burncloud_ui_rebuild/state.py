@@ -161,5 +161,9 @@ class UIRebuildState(TypedDict, total=False):
     final_findings: list[Finding]
     human_decision: bool
     release_status: str
+    pull_request_number: int
+    pull_request_url: str
+    pull_request_title: str
+    pull_request_status: str
     phase: str
     warnings: list[str]

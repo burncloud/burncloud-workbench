@@ -101,6 +101,7 @@ class UIRebuildState(TypedDict, total=False):
     model_name: str
     page_limit: int
     start_new_task: bool
+    autopilot_mode: bool
 
     base_repo_root: str
     base_branch: str

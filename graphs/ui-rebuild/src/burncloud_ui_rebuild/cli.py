@@ -10,6 +10,7 @@ from burncloud_ui_rebuild.agents import run_agent_check
 from burncloud_ui_rebuild.coding_tools import checkpoint_history, restore_page_checkpoint
 from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root
 from burncloud_ui_rebuild.graph import build_graph, initial_state
+from burncloud_ui_rebuild.notifications import telegram_check
 from burncloud_ui_rebuild.worktree import find_reusable_agent_worktree
 
 
@@ -23,6 +24,7 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "completed_pages": len(result.get("completed_pages", [])),
             "current_page_status": result.get("current_page_status", ""),
             "budget_usage": result.get("budget_usage", {}),
+            "notification_history": result.get("notification_history", []),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
             "interrupt": str(result["__interrupt__"]),
@@ -39,6 +41,7 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "completed_pages": len(result.get("completed_pages", [])),
             "current_page_status": result.get("current_page_status", ""),
             "budget_usage": result.get("budget_usage", {}),
+            "notification_history": result.get("notification_history", []),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
             "warnings": result.get("warnings", []),
@@ -64,6 +67,8 @@ def main() -> None:
     check = sub.add_parser("agent-check", help="Verify model access and tool calling without source writes.")
     check.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
 
+    sub.add_parser("telegram-check", help="Send one Telegram test notification using local environment secrets.")
+
     rebuild = sub.add_parser("rebuild", help="Run the real v1 Scout→Plan→Build→Verify→Review graph.")
     rebuild.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
     rebuild.add_argument("--limit", type=int, default=1, help="Maximum pages for this bounded run.")
@@ -71,7 +76,7 @@ def main() -> None:
     rebuild.add_argument("--write", action="store_true", help="Acknowledge writes to the isolated Agent worktree.")
     rebuild.add_argument("--approve", action="store_true", help="Resume the final Human Gate.")
 
-    checkpoints = sub.add_parser("checkpoints", help="List local page checkpoint commits on the reusable Agent worktree.")
+    sub.add_parser("checkpoints", help="List local page checkpoint commits on the reusable Agent worktree.")
 
     recover = sub.add_parser("recover", help="Restore the reusable Agent worktree to a known page checkpoint.")
     recover.add_argument("--commit", required=True, help="Exact checkpoint commit shown by the checkpoints command.")
@@ -83,6 +88,13 @@ def main() -> None:
         result = run_agent_check(args.model)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if result["status"] != "PASS":
+            raise SystemExit(1)
+        return
+
+    if args.command == "telegram-check":
+        result = telegram_check()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("status") != "sent":
             raise SystemExit(1)
         return
 

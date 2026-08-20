@@ -27,7 +27,9 @@ class HarnessPolicy:
     max_plan_rounds: int = 2
     max_page_seconds: int = 2_400
     max_run_seconds: int = 7_200
-    max_page_tokens: int = 350_000
+    # A normal Studio run defaults to one page. Let that page use the full
+    # one-million-token graph budget rather than tripping an earlier page cap.
+    max_page_tokens: int = 1_000_000
     max_run_tokens: int = 1_000_000
     max_agent_invocations_per_page: int = 12
 

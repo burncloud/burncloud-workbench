@@ -7,11 +7,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from burncloud_ui_rebuild.agents import run_agent_check
+from burncloud_ui_rebuild.autopilot import run_autopilot
 from burncloud_ui_rebuild.coding_tools import checkpoint_history, restore_page_checkpoint
-from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root
+from burncloud_ui_rebuild.config import DEFAULT_MODEL_NAME, source_root, workbench_root
 from burncloud_ui_rebuild.graph import build_graph, initial_state
 from burncloud_ui_rebuild.notifications import telegram_check
+from burncloud_ui_rebuild.scenario_simulator import run_scenarios
 from burncloud_ui_rebuild.studio_supervisor import run_studio_supervisor
+from burncloud_ui_rebuild.task_store import load_task_snapshot, task_path
 from burncloud_ui_rebuild.worktree import current_branch, migrate_legacy_agent_worktree
 
 
@@ -25,6 +28,9 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "completed_pages": len(result.get("completed_pages", [])),
             "current_page_status": result.get("current_page_status", ""),
             "budget_usage": result.get("budget_usage", {}),
+            "task_total_tokens": result.get("task_total_tokens", 0),
+            "continuation_runs": result.get("continuation_runs", 0),
+            "task_snapshot": result.get("task_snapshot", {}),
             "notification_history": result.get("notification_history", []),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
@@ -47,6 +53,9 @@ def _print_run_result(result: dict, *, approve: bool, graph, config: dict) -> No
             "completed_pages": len(result.get("completed_pages", [])),
             "current_page_status": result.get("current_page_status", ""),
             "budget_usage": result.get("budget_usage", {}),
+            "task_total_tokens": result.get("task_total_tokens", 0),
+            "continuation_runs": result.get("continuation_runs", 0),
+            "task_snapshot": result.get("task_snapshot", {}),
             "notification_history": result.get("notification_history", []),
             "changed_files": result.get("changed_files", []),
             "validation_results": result.get("validation_results", []),
@@ -58,9 +67,7 @@ def _current_agent_repo() -> str:
     root = source_root().resolve()
     branch = current_branch(root)
     if not branch.startswith("agent/ui-rebuild/"):
-        raise SystemExit(
-            f"BurnCloud checkout is on {branch!r}; checkpoints/recovery require the current agent/ui-rebuild/* branch."
-        )
+        raise SystemExit(f"BurnCloud checkout is on {branch!r}; this command requires the current agent/ui-rebuild/* branch.")
     return str(root)
 
 
@@ -78,17 +85,25 @@ def main() -> None:
 
     sub.add_parser("telegram-check", help="Send one Telegram test notification using local environment secrets.")
     sub.add_parser("studio", help="Run langgraph dev under the Telegram-aware Studio supervisor.")
+    sub.add_parser("scenarios", help="Run deterministic Graph routing regression scenarios without model calls.")
+    sub.add_parser("task-status", help="Show the compact persisted Task state for the current Agent branch.")
+
+    auto = sub.add_parser("autopilot", help="Run one Task headlessly across bounded continuation Runs until PR or human exception.")
+    auto.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
+    auto.add_argument("--limit", type=int, default=1, help="Maximum pages in this Task; defaults to one golden page.")
+    auto.add_argument("--new-task", action="store_true", help="Explicitly start a fresh Agent branch from main.")
+    auto.add_argument("--max-runs", type=int, default=None, help="Optional local ceiling for bounded continuation Runs.")
 
     migrate = sub.add_parser("migrate-legacy-worktree", help="Move previous Agent worktrees back into the primary BurnCloud checkout once.")
     migrate.add_argument("--confirm", action="store_true", help="Required because dirty legacy changes may be temporarily stashed and restored.")
 
-    rebuild = sub.add_parser("rebuild", help="Run the real v1 Scout→Plan→Build→Verify→Review graph.")
+    rebuild = sub.add_parser("rebuild", help="Run one bounded Scout→Plan→Build→Verify→Review Graph slice.")
     rebuild.add_argument("--model", default=DEFAULT_MODEL_NAME, help=f"Defaults to {DEFAULT_MODEL_NAME}.")
     rebuild.add_argument("--limit", type=int, default=1, help="Maximum pages for this bounded run.")
     rebuild.add_argument("--thread-id", default="burncloud-graph-engineering-v1-live")
     rebuild.add_argument("--write", action="store_true", help="Acknowledge writes to the current Agent branch.")
     rebuild.add_argument("--new-task", action="store_true", help="Start a fresh Agent branch from main. Dirty active branches are never abandoned automatically.")
-    rebuild.add_argument("--approve", action="store_true", help="Resume the final Human Gate; successful completion then pushes the Agent branch and creates/reuses one Draft PR.")
+    rebuild.add_argument("--approve", action="store_true", help="Resume the final Human Gate; successful completion then creates/reuses one Draft PR.")
 
     sub.add_parser("checkpoints", help="List page checkpoint commits on the current Agent branch.")
 
@@ -114,6 +129,38 @@ def main() -> None:
 
     if args.command == "studio":
         raise SystemExit(run_studio_supervisor())
+
+    if args.command == "scenarios":
+        result = run_scenarios()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("status") != "PASS":
+            raise SystemExit(1)
+        return
+
+    if args.command == "task-status":
+        root = source_root().resolve()
+        branch = current_branch(root)
+        snapshot = load_task_snapshot(branch, workbench_root()) if branch.startswith("agent/ui-rebuild/") else None
+        print(json.dumps({
+            "branch": branch,
+            "path": str(task_path(branch, workbench_root())) if branch.startswith("agent/ui-rebuild/") else "",
+            "snapshot": snapshot,
+        }, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "autopilot":
+        if args.limit < 1 or args.limit > 25:
+            parser.error("--limit must be between 1 and 25")
+        result = run_autopilot(
+            model_name=args.model,
+            page_limit=args.limit,
+            start_new_task=args.new_task,
+            max_runs=args.max_runs,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("status") in {"human_required", "continuation_limit_exhausted"}:
+            raise SystemExit(2)
+        return
 
     if args.command == "migrate-legacy-worktree":
         if not args.confirm:
@@ -141,10 +188,7 @@ def main() -> None:
     if args.command == "dry-run":
         graph = build_graph(checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": args.thread_id}}
-        result = graph.invoke(
-            initial_state(execution_mode="dry_run", thread_id=args.thread_id, page_limit=args.limit),
-            config=config,
-        )
+        result = graph.invoke(initial_state(execution_mode="dry_run", thread_id=args.thread_id, page_limit=args.limit), config=config)
         _print_run_result(result, approve=args.approve, graph=graph, config=config)
         return
 

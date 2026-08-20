@@ -53,11 +53,15 @@ class HarnessPolicy:
         "application_integration_check",
     )
 
-    scout_budget: AgentBudget = AgentBudget(max_model_calls=8, max_tool_calls=20)
-    planner_budget: AgentBudget = AgentBudget(max_model_calls=8, max_tool_calls=20)
-    builder_budget: AgentBudget = AgentBudget(max_model_calls=18, max_tool_calls=40)
-    reviewer_budget: AgentBudget = AgentBudget(max_model_calls=10, max_tool_calls=24)
-    fixer_budget: AgentBudget = AgentBudget(max_model_calls=12, max_tool_calls=28)
+    # BurnCloud is a large Rust workspace. Keep per-role loop ceilings high enough
+    # for real repository exploration while retaining the one-million-token Graph
+    # budget, wall-clock budgets, invocation budget and deterministic Graph edges as
+    # the outer safety boundaries.
+    scout_budget: AgentBudget = AgentBudget(max_model_calls=90, max_tool_calls=240)
+    planner_budget: AgentBudget = AgentBudget(max_model_calls=60, max_tool_calls=150)
+    builder_budget: AgentBudget = AgentBudget(max_model_calls=120, max_tool_calls=300)
+    reviewer_budget: AgentBudget = AgentBudget(max_model_calls=60, max_tool_calls=150)
+    fixer_budget: AgentBudget = AgentBudget(max_model_calls=90, max_tool_calls=240)
 
 
 DEFAULT_POLICY = HarnessPolicy()

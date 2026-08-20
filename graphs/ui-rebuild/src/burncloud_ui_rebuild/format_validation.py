@@ -29,6 +29,59 @@ def _safe_rust_paths(source_root: str | Path, paths: Iterable[str]) -> list[tupl
     return selected
 
 
+def _clip_output(text: str) -> str:
+    if len(text) <= DEFAULT_POLICY.max_tool_output_chars:
+        return text
+    return text[: DEFAULT_POLICY.max_tool_output_chars] + "\n... [truncated]"
+
+
+def run_page_rustfmt_apply(source_root: str | Path, paths: Iterable[str]) -> dict[str, object]:
+    """Deterministically format only Rust files owned by the approved page scope.
+
+    Formatting is code-owned reliability work, not an Agent judgement task. The
+    graph runs Scope Guard before and after this node, so any unexpected file
+    expansion caused by rustfmt is caught before compile/test or checkpointing.
+    """
+    root = Path(source_root).resolve()
+    selected = _safe_rust_paths(root, paths)
+    if not selected:
+        return {
+            "command": "page_rustfmt_apply",
+            "returncode": 0,
+            "output": "NO_PAGE_RUST_FILES",
+            "formatted_files": [],
+        }
+
+    outputs: list[str] = []
+    failed = False
+    formatted: list[str] = []
+    for relative, target in selected:
+        completed = subprocess.run(
+            ["rustfmt", "--edition", "2021", str(target)],
+            cwd=root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
+        if completed.returncode != 0:
+            failed = True
+        else:
+            formatted.append(relative)
+        body = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        if body:
+            outputs.append(f"[{relative}]\n{body}")
+
+    return {
+        "command": "page_rustfmt_apply " + " ".join(relative for relative, _ in selected),
+        "returncode": 1 if failed else 0,
+        "output": _clip_output("\n\n".join(outputs)) or "OK",
+        "formatted_files": formatted,
+    }
+
+
 def run_page_rustfmt_check(source_root: str | Path, paths: Iterable[str]) -> dict[str, object]:
     """Check formatting only for Rust files owned by the current page scope.
 
@@ -66,12 +119,9 @@ def run_page_rustfmt_check(source_root: str | Path, paths: Iterable[str]) -> dic
         if body:
             outputs.append(f"[{relative}]\n{body}")
 
-    output = "\n\n".join(outputs)
-    if len(output) > DEFAULT_POLICY.max_tool_output_chars:
-        output = output[: DEFAULT_POLICY.max_tool_output_chars] + "\n... [truncated]"
     return {
         "command": "page_rustfmt_check " + " ".join(relative for relative, _ in selected),
         "returncode": 1 if failed else 0,
-        "output": output or "OK",
+        "output": _clip_output("\n\n".join(outputs)) or "OK",
         "checked_files": [relative for relative, _ in selected],
     }

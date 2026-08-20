@@ -5,6 +5,7 @@ import json
 import pytest
 
 import burncloud_ui_rebuild.notifications as notifications
+from burncloud_ui_rebuild.nodes import bootstrap
 
 
 class _FakeResponse:
@@ -146,3 +147,13 @@ def test_error_boundary_notifies_then_reraises(monkeypatch):
         wrapped({"thread_id": "thread-3"})
 
     assert captured == [("实施修改", "RuntimeError")]
+
+
+def test_studio_bootstrap_generates_unique_run_ids_when_omitted():
+    first = bootstrap({})
+    second = bootstrap({})
+
+    assert first["thread_id"].startswith("burncloud-studio-")
+    assert second["thread_id"].startswith("burncloud-studio-")
+    assert first["thread_id"] != second["thread_id"]
+    assert bootstrap({"thread_id": "explicit-thread"})["thread_id"] == "explicit-thread"

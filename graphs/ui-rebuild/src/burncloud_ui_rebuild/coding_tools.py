@@ -18,6 +18,7 @@ TEXT_SUFFIXES = {
 }
 MAX_TOOL_OUTPUT = DEFAULT_POLICY.max_tool_output_chars
 MAX_WRITE_FILES_PER_AGENT = DEFAULT_POLICY.max_write_files_per_agent
+MAX_RESTORE_FILES_PER_AGENT = DEFAULT_POLICY.max_restore_files_per_agent
 
 
 class ToolSafetyError(RuntimeError):
@@ -103,10 +104,19 @@ def _run(root: Path, argv: list[str], *, timeout: int) -> dict[str, object]:
 
 def git_status(source_root: str | Path) -> str:
     root = Path(source_root).resolve()
-    result = _run(root, ["git", "status", "--porcelain"], timeout=30)
-    if result["returncode"] != 0:
-        raise RuntimeError(str(result["output"]))
-    return str(result["output"])
+    completed = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout).strip())
+    return completed.stdout.rstrip("\r\n")
 
 
 def git_branch(source_root: str | Path) -> str:
@@ -223,6 +233,7 @@ def build_coding_tools(
     source = Path(source_root).resolve()
     workbench = Path(workbench_root).resolve()
     touched_paths: set[str] = set()
+    restored_paths: set[str] = set()
     planned_files = {normalize_repo_path(path) for path in allowed_write_files} if allowed_write_files is not None else None
     restorable_files = {normalize_repo_path(path) for path in allowed_restore_files} if allowed_restore_files is not None else None
 
@@ -240,7 +251,7 @@ def build_coding_tools(
             return None
         if len(touched_paths) >= MAX_WRITE_FILES_PER_AGENT:
             return (
-                f"WRITE_BUDGET_REFUSED: this Agent is limited to {MAX_WRITE_FILES_PER_AGENT} distinct files per run. "
+                f"WRITE_BUDGET_REFUSED: this Agent is limited to {MAX_WRITE_FILES_PER_AGENT} distinct edited files per run. "
                 f"Already touched: {sorted(touched_paths)}."
             )
         touched_paths.add(relative)
@@ -256,11 +267,19 @@ def build_coding_tools(
         relative = normalize_repo_path(target.relative_to(source).as_posix())
         if restorable_files is not None and relative not in restorable_files:
             return f"RESTORE_SCOPE_REFUSED: {relative} is not in current dirty-file restore scope={sorted(restorable_files)}."
-        return claim_budget(relative)
+        if relative in restored_paths:
+            return None
+        if len(restored_paths) >= MAX_RESTORE_FILES_PER_AGENT:
+            return (
+                f"RESTORE_BUDGET_REFUSED: this Agent is limited to {MAX_RESTORE_FILES_PER_AGENT} Graph-approved restores per run. "
+                f"Already restored: {sorted(restored_paths)}."
+            )
+        restored_paths.add(relative)
+        return None
 
     @tool("read_source_file")
     def read_source_file(path: str, start_line: int = 1, end_line: int = 250) -> str:
-        """Read source inside the Agent worktree. Missing paths are recoverable."""
+        """Read source inside the current Agent branch checkout. Missing paths are recoverable."""
         target = _safe_path(source, path, allow_missing=True)
         if not target.exists():
             return _recoverable_path_error("NOT_FOUND", path)
@@ -326,7 +345,7 @@ def build_coding_tools(
 
     @tool("git_diff")
     def git_diff() -> str:
-        """Show current uncommitted Agent-worktree diff. Read-only."""
+        """Show current uncommitted Agent-branch diff. Read-only."""
         result = _run(source, ["git", "diff", "--no-ext-diff", "--unified=3", "--", "."], timeout=30)
         if result["returncode"] != 0:
             raise RuntimeError(str(result["output"]))
@@ -334,7 +353,7 @@ def build_coding_tools(
 
     @tool("git_worktree_status")
     def git_worktree_status() -> str:
-        """Show porcelain Git status for the Agent worktree. Read-only."""
+        """Show porcelain Git status for the current Agent branch checkout. Read-only."""
         return git_status(source) or "CLEAN"
 
     tools = [read_source_file, read_workbench_file, list_source_directory, search_source, git_diff, git_worktree_status]
@@ -365,7 +384,7 @@ def build_coding_tools(
 
         @tool("create_source_file")
         def create_source_file(path: str, content: str) -> str:
-            """Create one approved planned UTF-8 file inside the Agent worktree."""
+            """Create one approved planned UTF-8 file inside the current Agent branch checkout."""
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             if target.exists():
@@ -393,7 +412,7 @@ def build_coding_tools(
 
         @tool("restore_source_file")
         def restore_source_file(path: str) -> str:
-            """Discard uncommitted changes in one current dirty tracked file without granting edit scope."""
+            """Discard one Graph-approved dirty tracked file without consuming edit budget."""
             assert_write_branch()
             target = _safe_path(source, path, allow_missing=True)
             relative = normalize_repo_path(target.relative_to(source).as_posix())
@@ -403,7 +422,11 @@ def build_coding_tools(
             refused = claim_restore(target)
             if refused:
                 return refused
-            result = _run(source, ["git", "restore", "--", relative], timeout=30)
+            result = _run(
+                source,
+                ["git", "restore", "--source=HEAD", "--staged", "--worktree", "--", relative],
+                timeout=30,
+            )
             if result["returncode"] != 0:
                 return f"RESTORE_REFUSED: {result['output']}"
             return f"RESTORED {relative} TO HEAD"

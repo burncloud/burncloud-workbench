@@ -4,7 +4,6 @@ import time
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command
 
 from .config import DEFAULT_MODEL_NAME
 from .graph import build_graph, initial_state
@@ -36,8 +35,8 @@ def run_autopilot(
     """Run one engineering Task across multiple bounded Graph Runs.
 
     Each continuation uses a fresh in-memory LangGraph thread but restores compact
-    Task state from the Agent branch Task Store. A clean final gate is resumed
-    automatically; any blocking/major final finding remains a human exception.
+    Task state from the Agent branch Task Store. Clean final gates bypass human
+    interruption; real blocker/major findings still stop at the human exception gate.
     """
     ceiling = max_runs or (DEFAULT_POLICY.max_continuation_runs + 1)
     history: list[dict[str, Any]] = []
@@ -53,24 +52,22 @@ def run_autopilot(
                 model_name=model_name,
                 page_limit=page_limit,
                 start_new_task=start_new_task if run_no == 1 else False,
+                autopilot_mode=True,
             ),
             config=config,
         )
 
+        history.append(_summary(result, run_no=run_no))
         if "__interrupt__" in result:
             blockers = list(blocking_findings(result.get("final_findings", [])))
-            if blockers:
-                history.append(_summary(result, run_no=run_no))
-                return {
-                    "status": "human_required",
-                    "reason": result.get("last_failure_reason", "") or "Graph reached a blocking human exception gate.",
-                    "blockers": blockers,
-                    "history": history,
-                    "agent_branch": result.get("agent_branch", ""),
-                }
-            result = graph.invoke(Command(resume=True), config=config)
+            return {
+                "status": "human_required",
+                "reason": result.get("last_failure_reason", "") or "Graph reached a blocking human exception gate.",
+                "blockers": blockers,
+                "history": history,
+                "agent_branch": result.get("agent_branch", ""),
+            }
 
-        history.append(_summary(result, run_no=run_no))
         status = str(result.get("release_status", result.get("phase", "")))
         if status == "continuation_required":
             continue

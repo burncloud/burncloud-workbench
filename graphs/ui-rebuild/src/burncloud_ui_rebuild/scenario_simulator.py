@@ -3,8 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .graph import _after_page_rebuild
-from .page_graph import _after_fix, _after_review, _after_scope_guard
+from .graph import _after_page_rebuild, _final_gate_router
+from .page_graph import (
+    _after_code_verification,
+    _after_fix,
+    _after_formatter,
+    _after_page_entry,
+    _after_review,
+    _after_scope_guard,
+)
 from .policy import DEFAULT_POLICY
 
 
@@ -64,6 +71,15 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario("review_outside_plan_replans", _review_outside_plan_replans),
     Scenario("run_budget_continues", _run_budget_continues),
     Scenario("task_budget_escalates", _task_budget_escalates),
+    Scenario("deterministic_format_passes_to_scope", lambda: _after_formatter({"verification_findings": []}) == "范围复核"),
+    Scenario("validation_failure_goes_to_fixer", lambda: _after_code_verification({
+        "verification_findings": [{"severity": "blocker", "code": "CLIENT_CHECK", "message": "compile"}],
+    }) == "修复"),
+    Scenario("persisted_plan_resumes_builder", lambda: _after_page_entry({"resume_page_stage": "build"}) == "继续施工"),
+    Scenario("clean_autopilot_skips_human_gate", lambda: _final_gate_router({
+        "autopilot_mode": True,
+        "final_findings": [],
+    }) == "自动批准"),
 )
 
 
@@ -73,7 +89,7 @@ def run_scenarios() -> dict[str, object]:
         try:
             passed = bool(scenario.run())
             error = ""
-        except Exception as exc:  # simulator must report the failure instead of hiding it
+        except Exception as exc:
             passed = False
             error = f"{type(exc).__name__}: {exc}"
         results.append({"name": scenario.name, "passed": passed, "error": error})

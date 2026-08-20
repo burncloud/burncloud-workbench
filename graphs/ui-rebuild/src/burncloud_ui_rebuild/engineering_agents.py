@@ -172,6 +172,7 @@ Planner rules:
 - Every writable file MUST appear in allowed_files before Builder starts.
 - Plan at most {DEFAULT_POLICY.max_plan_files} files.
 - Page implementation is client-scoped. Backend gaps must be reported, not papered over with fake frontend data.
+- If scout_report contains preexisting_dirty_files from a retry, explicitly keep only relevant carry-over by listing it in allowed_files; omit unrelated carry-over so deterministic cleanup can restore it.
 - Prefer truthful Unknown/Unavailable states when an approved backend source does not exist.
 - Do not edit files.
 """,
@@ -196,7 +197,7 @@ def run_planned_builder_agent(*, model_name: str, source_root: str, workbench_ro
         allow_write=True,
         expected_branch=agent_branch,
         allowed_write_files=allowed_files,
-        allowed_restore_files=allowed_files,
+        allowed_restore_files=[],
     )
     agent = create_agent(
         model=create_chat_model(model_name, timeout=budget.model_timeout_seconds),
@@ -206,7 +207,8 @@ def run_planned_builder_agent(*, model_name: str, source_root: str, workbench_ro
 
 Builder rules:
 - Implement the approved plan; do not rediscover or redesign the whole page.
-- You may edit or restore ONLY files in allowed_files. Tool enforcement rejects anything else.
+- You may edit ONLY files in allowed_files. Tool enforcement rejects anything else.
+- Builder may not restore retry carry-over to HEAD; cleanup ownership belongs to Fixer after Scope Guard.
 - If the plan is insufficient, return BLOCKED rather than expanding scope.
 - Use exact targeted edits; format only Rust files intentionally changed.
 - Inspect git_diff before finishing, but leave fmt/check/test to deterministic graph nodes.
@@ -287,8 +289,9 @@ def run_v1_fixer_agent(
 Fixer rules:
 - Fix only supplied blocking findings inside the already-approved plan scope.
 - Do not add new editable files to the plan or perform unrelated refactors.
-- Files outside allowed_files may only be discarded with restore_source_file when explicitly listed in restore_files because they are already dirty scope pollution.
+- Files outside allowed_files may only be discarded with restore_source_file when explicitly listed in restore_files because Scope Guard classified them as page-local pollution or unrelated retry carry-over.
 - restore_source_file does NOT grant edit permission to that file.
+- Never restore a carry-over file that Planner explicitly preserved in allowed_files.
 - If a finding requires a backend capability not approved for this page graph, return BLOCKED and preserve the BackendGap.
 - Leave deterministic validation to the graph after you finish.
 """,

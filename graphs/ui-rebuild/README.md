@@ -14,6 +14,7 @@ Policy          负责哪些事情绝对不能越界
 Reality Anchor  负责现实事实
 Git Checkpoint  负责外部副作用恢复
 Human Gate      负责最终高风险批准
+Notification    负责异常、人工审核和成功完成的外部提醒
 ```
 
 固定产品边界：
@@ -42,6 +43,8 @@ Buyer / Supplier / Admin 是独立 Workspace Role；普通账号可以同时拥�
 → 创建开发分支 / 复用 worktree
 → 写入预检
 → 运行上下文
+→ 恢复通知（仅需要恢复审批时）
+→ 恢复审批
 → 恢复检查
 → 架构规划
 → 选择下一页
@@ -49,8 +52,10 @@ Buyer / Supplier / Admin 是独立 Workspace Role；普通账号可以同时拥�
 → 页面检查点
 → 标记页面完成
 → 最终质量检查
+→ 人工审核通知
 → 人工审批
 → 发布状态
+→ 完成通知（仅成功完成时）
 ```
 
 ## 页面工程子图
@@ -103,6 +108,8 @@ Fixer
 ```
 
 其余节点均由确定性 Python 控制。
+
+所有普通主图节点和页面子图节点都有错误通知边界：节点真正抛异常时，Harness 会先尝试发送 Telegram 错误通知，再把原异常继续抛给 LangGraph。`interrupt()` 属于正常控制流，不会被误报成错误。
 
 ## HarnessPolicy
 
@@ -210,9 +217,16 @@ BudgetUsage
 ├ input/output/total tokens
 ├ page budget counters
 └ run budget counters
+
+NotificationHistory
+├ event
+├ sent / failed / disabled / deduplicated
+└ non-secret delivery metadata
 ```
 
 Agent 节点只接收完成自身职责所需的最小 Context，不把整个历史聊天塞进每一个模型调用。
+
+Studio 使用 `{}` 新建运行时，如果没有显式提供 `thread_id`，Harness 会生成唯一 Run ID，避免不同运行的 Telegram 去重键互相碰撞。
 
 ## Git 隔离
 
@@ -281,35 +295,71 @@ Recovery 规则：
 - 使用 `git reset --hard <checkpoint>` 恢复 tracked 文件。
 - 不自动删除 untracked 文件。
 - main 永远不参与恢复。
+- Studio 中需要恢复确认时，会在真正 `interrupt()` 前先发送 Telegram 人工审核提醒。
 
-Studio State 也支持：
+## Telegram 通知
 
-```json
-{
-  "recovery_request": {
-    "target_commit": "<checkpoint SHA>",
-    "confirmed": true
-  }
-}
+通知由 Harness 的确定性 Notification Layer 负责，不交给 LLM Agent。
+
+触发规则：
+
+```text
+任何普通 Graph/Page Node 抛异常
+→ 🚨 图错误通知
+
+进入 Git Recovery 人工确认
+→ 🟠 需要人工审核通知
+
+进入最终 Human Gate
+→ 🟡 需要人工审核通知
+
+write Run 通过 Human Gate 并达到 approved_agent_branch_no_git_publish
+→ ✅ 任务完成通知
 ```
+
+通知内容会包含节点、页面、状态、Agent branch、Thread/Run ID、首个阻塞原因或最新 checkpoint 等必要信息，但不会主动发送 API Key、Bot Token 等 Secret。
+
+Telegram 投递原则：
+
+- 最多 3 次短重试处理临时网络错误、429、5xx。
+- 同一个 Run/Event 在单进程内去重，避免重试节点造成重复轰炸。
+- Telegram 最终发送失败只记为 `failed`，不能让 Harness 主任务失败。
+- `notification_history` 可在 Studio/CLI 里查看通知状态。
+- dry-run 不发送“人工审核/完成”通知；真正 Node 异常仍可通知。
 
 ## Secrets
 
-`.env` 只使用三个参数：
+模型连接仍使用原来的三个本地参数；启用 Telegram 再增加两个本地参数：
 
 ```env
 API_KEY=xxxxxxxx
 BASE_URL=http://127.0.0.1:8080/v1
 LANGSMITH_API_KEY=xxxxxxxx
+TELEGRAM_BOT_TOKEN=xxxxxxxx
+TELEGRAM_CHAT_ID=xxxxxxxx
 ```
 
-真实 Key 不得进入 Python、Markdown、YAML、测试、Prompt、日志或 Git commit。
+`.env` 不提交 Git；`.env.example` 只保留占位符。真实 Key/Token 不得进入 Python、Markdown、YAML、测试、Prompt、日志或 Git commit。
 
 默认模型不是 secret：
 
 ```text
 gpt-5.6-sol
 ```
+
+配置好 Telegram 后先测试：
+
+```bat
+burncloud-ui-rebuild telegram-check
+```
+
+成功输出：
+
+```text
+status = sent
+```
+
+同时 Telegram 会收到一条测试消息。
 
 ## 本地更新
 
@@ -365,6 +415,12 @@ burncloud-ui-rebuild dry-run --limit 1
 burncloud-ui-rebuild agent-check
 ```
 
+Telegram 健康检查：
+
+```bat
+burncloud-ui-rebuild telegram-check
+```
+
 ## Release 边界
 
 当前 Harness 会：
@@ -375,6 +431,7 @@ burncloud-ui-rebuild agent-check
 确定性验证
 本地 page checkpoint commit
 Human Gate
+Telegram 生命周期通知
 ```
 
 当前 Harness 不会自动：

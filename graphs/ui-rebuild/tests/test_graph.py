@@ -13,6 +13,7 @@ from burncloud_ui_rebuild.page_graph import (
     _after_code_verification,
     _after_fix,
     _after_formatter,
+    _after_page_entry,
     _after_plan_guard,
     _after_post_format_scope_guard,
     _after_reality_anchor,
@@ -47,6 +48,12 @@ def test_completed_unintegrated_branch_routes_directly_to_pr_release():
     assert _branch_router({}) == "继续工程"
 
 
+def test_page_entry_resumes_from_compact_task_stage():
+    assert _after_page_entry({"resume_page_stage": "fresh"}) == "新页面"
+    assert _after_page_entry({"resume_page_stage": "plan"}) == "继续规划"
+    assert _after_page_entry({"resume_page_stage": "validate"}) == "安全验证"
+
+
 def test_v1_scout_plan_builder_routing():
     assert _after_scout({"current_page_status": "scouted"}) == "规划"
     assert _after_scout({"current_page_status": "scout_blocked"}) == "人工介入"
@@ -78,16 +85,9 @@ def test_only_major_and_blocker_findings_trigger_repair():
 
 
 def test_scope_unplanned_files_replan_before_spending_fixer_rounds():
-    unplanned = [{
-        "severity": "blocker",
-        "code": "SCOPE_GUARD_UNPLANNED_FILES",
-        "message": "dashboard.rs is outside the approved plan",
-    }]
+    unplanned = [{"severity": "blocker", "code": "SCOPE_GUARD_UNPLANNED_FILES", "message": "dashboard.rs is outside the approved plan"}]
     assert _after_scope_guard({"verification_findings": unplanned, "plan_round": 1}) == "重新规划"
-    assert _after_scope_guard({
-        "verification_findings": unplanned,
-        "plan_round": DEFAULT_POLICY.max_plan_rounds,
-    }) == "修复"
+    assert _after_scope_guard({"verification_findings": unplanned, "plan_round": DEFAULT_POLICY.max_plan_rounds}) == "修复"
     assert _after_post_format_scope_guard({"verification_findings": unplanned, "plan_round": 1}) == "重新规划"
 
 
@@ -115,32 +115,23 @@ def test_fix_routing_replans_once_then_escalates():
     assert _after_fix({"current_page_status": "budget_exhausted"}) == "人工介入"
     assert _after_fix({"current_page_status": "fix_applied"}) == "重新检查范围"
     assert _after_fix({"current_page_status": "fix_blocked", "plan_round": 1}) == "重新规划"
-    assert _after_fix({
-        "current_page_status": "fix_blocked",
-        "plan_round": DEFAULT_POLICY.max_plan_rounds,
-    }) == "人工介入"
+    assert _after_fix({"current_page_status": "fix_blocked", "plan_round": DEFAULT_POLICY.max_plan_rounds}) == "人工介入"
 
 
 def test_fix_context_is_preserved_when_fixer_blocks():
     before = {
-        "verification_findings": [
-            {"severity": "blocker", "code": "CLIENT_CHECK", "message": "cargo check failed"}
-        ],
-        "review_findings": [
-            {"severity": "major", "code": "BUYER_OVERVIEW", "message": "missing required state"}
-        ],
+        "verification_findings": [{"severity": "blocker", "code": "CLIENT_CHECK", "message": "cargo check failed"}],
+        "review_findings": [{"severity": "major", "code": "BUYER_OVERVIEW", "message": "missing required state"}],
     }
     snapshot = _capture_fix_context(before)
-    after = _finalize_fix(
-        {
-            **snapshot,
-            "current_page_status": "fix_blocked",
-            "fix_round": 1,
-            "fixer_report": {"summary": "blocked"},
-            "verification_findings": [],
-            "review_findings": [],
-        }
-    )
+    after = _finalize_fix({
+        **snapshot,
+        "current_page_status": "fix_blocked",
+        "fix_round": 1,
+        "fixer_report": {"summary": "blocked"},
+        "verification_findings": [],
+        "review_findings": [],
+    })
 
     assert after["verification_findings"] == before["verification_findings"]
     assert after["review_findings"] == before["review_findings"]
@@ -149,15 +140,25 @@ def test_fix_context_is_preserved_when_fixer_blocks():
     assert after["fixer_report"]["summary"] == "blocked"
 
 
+def test_run_budget_continues_until_task_budget_is_exhausted():
+    run_exhausted = {
+        "current_page_status": "budget_exhausted",
+        "task_tokens_before_run": 4_000_000,
+        "budget_usage": {"total_tokens": 5_000_001},
+        "continuation_runs": 1,
+    }
+    task_exhausted = {
+        "current_page_status": "budget_exhausted",
+        "task_tokens_before_run": 10_000_000,
+        "budget_usage": {"total_tokens": 5_000_001},
+        "continuation_runs": 2,
+    }
+    assert _after_page_rebuild(run_exhausted) == "自动续跑"
+    assert _after_page_rebuild(task_exhausted) == "人工介入"
+
+
 def test_blocked_page_is_not_checkpointed_or_marked_complete():
-    for status in (
-        "scout_blocked",
-        "plan_rejected",
-        "builder_blocked",
-        "budget_exhausted",
-        "fix_exhausted",
-        "fix_blocked",
-    ):
+    for status in ("scout_blocked", "plan_rejected", "builder_blocked", "fix_exhausted", "fix_blocked"):
         assert _after_page_rebuild({"current_page_status": status}) == "人工介入"
     assert _after_page_rebuild({"current_page_status": "review_passed"}) == "页面通过"
     assert _after_page_rebuild({"current_page_status": "review_passed_with_warnings"}) == "页面通过"
@@ -167,12 +168,9 @@ def test_dry_run_processes_all_pages_then_waits_for_human():
     state = initial_state(execution_mode="dry_run", thread_id="test-ui-rebuild", page_limit=25)
     graph = build_graph(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "test-ui-rebuild"}}
-
     result = graph.invoke(state, config=config)
-
     assert len(result["completed_pages"]) == 25
     assert "__interrupt__" in result
-
     resumed = graph.invoke(Command(resume=True), config=config)
     assert resumed["release_status"] == "dry_run_complete_no_git_write"
 
@@ -181,9 +179,7 @@ def test_dry_run_defaults_to_first_golden_page():
     state = initial_state(execution_mode="dry_run", thread_id="test-ui-rebuild-one-page")
     graph = build_graph(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "test-ui-rebuild-one-page"}}
-
     result = graph.invoke(state, config=config)
-
     assert result["completed_pages"] == ["buyer-overview"]
     assert len(result["page_queue"]) == 1
     assert "__interrupt__" in result

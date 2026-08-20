@@ -10,6 +10,7 @@ from .engineering_nodes import (
     scope_guard_node,
     start_page_context,
 )
+from .notifications import error_notifying_node
 from .policy import DEFAULT_POLICY, blocking_findings
 from .quality_nodes import code_verifier, policy_fixer, policy_reviewer, reality_anchor
 from .state import UIRebuildState
@@ -116,20 +117,24 @@ def _after_fix(state: UIRebuildState) -> str:
     return "重新检查范围"
 
 
+def _add_safe_node(builder: StateGraph, name: str, node) -> None:
+    builder.add_node(name, error_notifying_node(name, node))
+
+
 def build_page_graph():
     builder = StateGraph(UIRebuildState)
-    builder.add_node(PAGE_NODE_CONTEXT, start_page_context)
-    builder.add_node(PAGE_NODE_SCOUT, page_scout_node)
-    builder.add_node(PAGE_NODE_PLANNER, planner_node)
-    builder.add_node(PAGE_NODE_PLAN_GUARD, plan_guard_node)
-    builder.add_node(PAGE_NODE_BUILDER, planned_builder_node)
-    builder.add_node(PAGE_NODE_SCOPE_GUARD, scope_guard_node)
-    builder.add_node(PAGE_NODE_CODE_VERIFY, code_verifier)
-    builder.add_node(PAGE_NODE_REALITY, reality_anchor)
-    builder.add_node(PAGE_NODE_REVIEWER, policy_reviewer)
-    builder.add_node(PAGE_NODE_CAPTURE_FIX, _capture_fix_context)
-    builder.add_node(PAGE_NODE_FIXER, policy_fixer)
-    builder.add_node(PAGE_NODE_FINALIZE_FIX, _finalize_fix)
+    _add_safe_node(builder, PAGE_NODE_CONTEXT, start_page_context)
+    _add_safe_node(builder, PAGE_NODE_SCOUT, page_scout_node)
+    _add_safe_node(builder, PAGE_NODE_PLANNER, planner_node)
+    _add_safe_node(builder, PAGE_NODE_PLAN_GUARD, plan_guard_node)
+    _add_safe_node(builder, PAGE_NODE_BUILDER, planned_builder_node)
+    _add_safe_node(builder, PAGE_NODE_SCOPE_GUARD, scope_guard_node)
+    _add_safe_node(builder, PAGE_NODE_CODE_VERIFY, code_verifier)
+    _add_safe_node(builder, PAGE_NODE_REALITY, reality_anchor)
+    _add_safe_node(builder, PAGE_NODE_REVIEWER, policy_reviewer)
+    _add_safe_node(builder, PAGE_NODE_CAPTURE_FIX, _capture_fix_context)
+    _add_safe_node(builder, PAGE_NODE_FIXER, policy_fixer)
+    _add_safe_node(builder, PAGE_NODE_FINALIZE_FIX, _finalize_fix)
 
     builder.add_edge(START, PAGE_NODE_CONTEXT)
     builder.add_edge(PAGE_NODE_CONTEXT, PAGE_NODE_SCOUT)

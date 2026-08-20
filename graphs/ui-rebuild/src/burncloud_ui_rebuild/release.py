@@ -154,40 +154,46 @@ def publish_pull_request(state: UIRebuildState) -> dict[str, Any]:
     release_status = "pull_request_reused"
 
     open_prs = [item for item in existing if str(item.get("state", "")).upper() == "OPEN"]
+    merged_prs = [item for item in existing if str(item.get("state", "")).upper() == "MERGED"]
+    closed_prs = [item for item in existing if str(item.get("state", "")).upper() == "CLOSED"]
+
     if open_prs:
         selected = open_prs[0]
+    elif merged_prs:
+        # A stale local main may not yet contain the merged commit. Never create a duplicate PR.
+        selected = merged_prs[0]
+        release_status = "pull_request_merged"
+    elif closed_prs:
+        closed = closed_prs[0]
+        raise ReleaseError(
+            "A matching Pull Request already exists but is closed without merge. "
+            f"Refusing to reopen or create a duplicate automatically: {closed.get('url', closed)}"
+        )
     else:
-        closed_prs = [item for item in existing if str(item.get("state", "")).upper() == "CLOSED"]
-        if closed_prs:
-            number = int(closed_prs[0]["number"])
-            _run(root, ["gh", "pr", "reopen", str(number)], timeout=60)
-            selected = _view_pr(root, number)
-            release_status = "pull_request_reopened"
+        title = _pr_title(pages)
+        body = _pr_body(branch=branch, base_branch=base_branch, pages=pages, diff_stat=diff_stat)
+        created_output = _run(
+            root,
+            [
+                "gh", "pr", "create",
+                "--draft",
+                "--base", base_branch,
+                "--head", branch,
+                "--title", title,
+                "--body", body,
+            ],
+            timeout=120,
+        )
+        match = re.search(r"https://github\.com/[^\s]+/pull/(\d+)", created_output)
+        if not match:
+            matches = _list_matching_prs(root, branch, base_branch)
+            open_matches = [item for item in matches if str(item.get("state", "")).upper() == "OPEN"]
+            if not open_matches:
+                raise ReleaseError(f"PR creation returned no parseable PR URL: {created_output}")
+            selected = open_matches[0]
         else:
-            title = _pr_title(pages)
-            body = _pr_body(branch=branch, base_branch=base_branch, pages=pages, diff_stat=diff_stat)
-            created_output = _run(
-                root,
-                [
-                    "gh", "pr", "create",
-                    "--draft",
-                    "--base", base_branch,
-                    "--head", branch,
-                    "--title", title,
-                    "--body", body,
-                ],
-                timeout=120,
-            )
-            match = re.search(r"https://github\.com/[^\s]+/pull/(\d+)", created_output)
-            if not match:
-                matches = _list_matching_prs(root, branch, base_branch)
-                open_matches = [item for item in matches if str(item.get("state", "")).upper() == "OPEN"]
-                if not open_matches:
-                    raise ReleaseError(f"PR creation returned no parseable PR URL: {created_output}")
-                selected = open_matches[0]
-            else:
-                selected = _view_pr(root, int(match.group(1)))
-            release_status = "pull_request_opened"
+            selected = _view_pr(root, int(match.group(1)))
+        release_status = "pull_request_opened"
 
     if selected is None:
         raise ReleaseError("Could not resolve the Pull Request after publication.")
@@ -200,7 +206,7 @@ def publish_pull_request(state: UIRebuildState) -> dict[str, Any]:
     mark_agent_branch_completed(root, branch)
     return {
         "release_status": release_status,
-        "branch_task_status": "awaiting_pr_merge",
+        "branch_task_status": "awaiting_pr_merge" if release_status != "pull_request_merged" else "merged_remote",
         "pull_request_number": number,
         "pull_request_url": url,
         "pull_request_title": str(selected.get("title", _pr_title(pages))),
@@ -216,7 +222,7 @@ def publish_pull_request_node(state: UIRebuildState) -> dict[str, Any]:
 def pull_request_completion_notification(state: UIRebuildState) -> dict[str, Any]:
     if state.get("execution_mode", "dry_run") != "write":
         return {}
-    if state.get("release_status") not in {"pull_request_opened", "pull_request_reused", "pull_request_reopened"}:
+    if state.get("release_status") not in {"pull_request_opened", "pull_request_reused"}:
         return {}
 
     thread_id = str(state.get("thread_id", "unknown"))

@@ -35,7 +35,7 @@ NODE_BOOTSTRAP = "初始化"
 NODE_SPEC = "读取规范"
 NODE_SCOUT = "仓库侦察"
 NODE_PERMISSION = "权限守卫"
-NODE_WORKTREE = "创建开发分支"
+NODE_WORKTREE = "准备开发分支"
 NODE_PREFLIGHT = "写入预检"
 NODE_RUN_CONTEXT = "运行上下文"
 NODE_RECOVERY_NOTIFY = "恢复通知"
@@ -58,6 +58,7 @@ def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
         "execution_mode": state.get("execution_mode", DEFAULT_EXECUTION_MODE),
         "page_limit": state.get("page_limit", DEFAULT_POLICY.default_page_limit),
         "max_fix_rounds": state.get("max_fix_rounds", DEFAULT_POLICY.max_fix_rounds),
+        "start_new_task": bool(state.get("start_new_task", False)),
     }
 
 
@@ -99,12 +100,10 @@ def build_graph(checkpointer=None):
     _add_safe_node(builder, NODE_PREFLIGHT, write_preflight)
     _add_safe_node(builder, NODE_RUN_CONTEXT, initialize_run_context)
     builder.add_node(NODE_RECOVERY_NOTIFY, recovery_review_notification)
-    # interrupt() is LangGraph control flow, so interrupt nodes are intentionally not error-wrapped.
     builder.add_node(NODE_RECOVERY_GATE, recovery_confirmation_gate)
     _add_safe_node(builder, NODE_RECOVERY, recovery_node)
     _add_safe_node(builder, NODE_ARCHITECTURE, architecture_agent)
     _add_safe_node(builder, NODE_SELECT_PAGE, select_next_page)
-    # Child nodes inside the page subgraph have their own error boundaries.
     builder.add_node(NODE_PAGE_REBUILD, page_rebuild)
     _add_safe_node(builder, NODE_PAGE_CHECKPOINT, page_checkpoint)
     _add_safe_node(builder, NODE_MARK_COMPLETE, mark_page_complete)
@@ -161,6 +160,7 @@ def initial_state(
     page_limit: int | None = DEFAULT_POLICY.default_page_limit,
     recovery_target_commit: str = "",
     recovery_confirmed: bool = False,
+    start_new_task: bool = False,
 ) -> UIRebuildState:
     base_repo = str(source_root())
     state: UIRebuildState = {
@@ -172,6 +172,7 @@ def initial_state(
         "source_repo_root": base_repo,
         "workbench_root": str(workbench_root()),
         "max_fix_rounds": DEFAULT_POLICY.max_fix_rounds,
+        "start_new_task": start_new_task,
         "completed_pages": [],
         "implementation_results": [],
         "page_checkpoint_history": [],

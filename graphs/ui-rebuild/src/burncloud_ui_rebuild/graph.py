@@ -25,7 +25,11 @@ from burncloud_ui_rebuild.page_graph import build_page_graph
 from burncloud_ui_rebuild.policy import DEFAULT_POLICY
 from burncloud_ui_rebuild.quality_nodes import human_review_gate, page_checkpoint
 from burncloud_ui_rebuild.recovery_gate import recovery_confirmation_gate
-from burncloud_ui_rebuild.release import publish_pull_request_node, pull_request_completion_notification
+from burncloud_ui_rebuild.release import (
+    publish_pull_request_node,
+    pull_request_completion_notification,
+    release_preflight_node,
+)
 from burncloud_ui_rebuild.state import UIRebuildState
 
 
@@ -35,6 +39,7 @@ NODE_SPEC = "读取规范"
 NODE_SCOUT = "仓库侦察"
 NODE_PERMISSION = "权限守卫"
 NODE_WORKTREE = "准备开发分支"
+NODE_RELEASE_PREFLIGHT = "Pull Request 发布预检"
 NODE_PREFLIGHT = "写入预检"
 NODE_RUN_CONTEXT = "运行上下文"
 NODE_RECOVERY_NOTIFY = "恢复通知"
@@ -62,8 +67,6 @@ def default_execution_mode(state: UIRebuildState) -> dict[str, object]:
 
 
 def _branch_router(state: UIRebuildState) -> str:
-    # A prior successful run may be restarted before its PR is merged. Do not
-    # rebuild the page again; idempotently push/reuse/create the same PR.
     if state.get("branch_task_status") in {"completed_unintegrated", "awaiting_pr_merge"}:
         return "提交PR"
     return "继续工程"
@@ -104,6 +107,7 @@ def build_graph(checkpointer=None):
     _add_safe_node(builder, NODE_SCOUT, repo_scout)
     _add_safe_node(builder, NODE_PERMISSION, permission_guardian)
     _add_safe_node(builder, NODE_WORKTREE, prepare_worktree)
+    _add_safe_node(builder, NODE_RELEASE_PREFLIGHT, release_preflight_node)
     _add_safe_node(builder, NODE_PREFLIGHT, write_preflight)
     _add_safe_node(builder, NODE_RUN_CONTEXT, initialize_run_context)
     builder.add_node(NODE_RECOVERY_NOTIFY, recovery_review_notification)
@@ -129,8 +133,9 @@ def build_graph(checkpointer=None):
     builder.add_conditional_edges(
         NODE_WORKTREE,
         _branch_router,
-        {"继续工程": NODE_PREFLIGHT, "提交PR": NODE_RELEASE},
+        {"继续工程": NODE_RELEASE_PREFLIGHT, "提交PR": NODE_RELEASE},
     )
+    builder.add_edge(NODE_RELEASE_PREFLIGHT, NODE_PREFLIGHT)
     builder.add_edge(NODE_PREFLIGHT, NODE_RUN_CONTEXT)
     builder.add_edge(NODE_RUN_CONTEXT, NODE_RECOVERY_NOTIFY)
     builder.add_edge(NODE_RECOVERY_NOTIFY, NODE_RECOVERY_GATE)
@@ -192,6 +197,7 @@ def initial_state(
         "budget_usage": {},
         "run_context": {},
         "page_context": {},
+        "release_preflight": {},
         "warnings": [],
         "phase": "start",
     }

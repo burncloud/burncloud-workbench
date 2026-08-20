@@ -82,6 +82,14 @@ class RecoveryRequest(TypedDict, total=False):
     confirmed: bool
 
 
+class NotificationEvent(TypedDict, total=False):
+    event: str
+    status: str
+    event_key: str
+    http_status: int
+    reason: str
+
+
 class UIRebuildState(TypedDict, total=False):
     # Stable runtime fields.
     thread_id: str
@@ -106,6 +114,7 @@ class UIRebuildState(TypedDict, total=False):
     invocation_history: list[InvocationUsage]
     recovery_request: RecoveryRequest
     recovery_result: dict[str, Any]
+    notification_history: list[NotificationEvent]
 
     specs: dict[str, dict[str, str]]
     page_queue: list[PageTask]

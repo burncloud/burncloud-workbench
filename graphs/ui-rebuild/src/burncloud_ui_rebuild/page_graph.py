@@ -19,6 +19,7 @@ from .quality_nodes import code_verifier, page_formatter, policy_fixer, policy_r
 from .state import Finding, UIRebuildState
 
 
+PAGE_NODE_ENTRY = "页面恢复入口"
 PAGE_NODE_CONTEXT = "页面上下文"
 PAGE_NODE_SCOUT = "代码侦察"
 PAGE_NODE_PLANNER = "修改计划"
@@ -36,6 +37,23 @@ PAGE_NODE_FINALIZE_FIX = "整理修复结果"
 PAGE_NODE_PREPARE_REPLAN = "准备重新规划"
 
 _REPO_FILE_RE = re.compile(r"crates/client/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+")
+
+
+def _page_entry(state: UIRebuildState) -> dict[str, object]:
+    page = state.get("current_page") or {}
+    context = state.get("page_context", {}) or {}
+    same_page = bool(page and context.get("page_id") == page.get("id"))
+    stage = str(state.get("resume_page_stage", "fresh")) if same_page else "fresh"
+    return {"resume_page_stage": stage}
+
+
+def _after_page_entry(state: UIRebuildState) -> str:
+    stage = str(state.get("resume_page_stage", "fresh"))
+    if stage == "validate":
+        return "安全验证"
+    if stage == "plan":
+        return "继续规划"
+    return "新页面"
 
 
 def _after_scout(state: UIRebuildState) -> str:
@@ -66,11 +84,6 @@ def _scope_failure_route(state: UIRebuildState) -> str:
     blockers = blocking_findings(state.get("verification_findings", []))
     if not blockers:
         return ""
-
-    # An unplanned page diff is first a planning mismatch, not a code-repair
-    # problem. Give Planner a bounded chance to explicitly adopt or redesign the
-    # scope before spending Fixer rounds. Other scope failures (for example stale
-    # retry carry-over) remain Fixer-owned cleanup work.
     codes = {str(item.get("code", "")) for item in blockers}
     if (
         "SCOPE_GUARD_UNPLANNED_FILES" in codes
@@ -103,20 +116,9 @@ def _after_reality_anchor(state: UIRebuildState) -> str:
 
 
 def _finding_repo_files(findings: list[dict[str, object]]) -> set[str]:
-    """Extract concrete writable client files cited by structured findings.
-
-    Reviewer evidence frequently contains locations such as
-    `crates/client/src/app.rs:18-60`. A finding that proves correction requires a
-    client file outside the approved allowlist is a planning mismatch; sending it
-    to Fixer cannot work because Fixer is intentionally forbidden from expanding
-    its own edit scope.
-    """
     paths: set[str] = set()
     for item in findings:
-        text = "\n".join(
-            str(item.get(field, ""))
-            for field in ("message", "evidence", "expected")
-        )
+        text = "\n".join(str(item.get(field, "")) for field in ("message", "evidence", "expected"))
         for match in _REPO_FILE_RE.findall(text):
             paths.add(normalize_repo_path(match))
     return paths
@@ -160,10 +162,7 @@ def _finalize_fix(state: UIRebuildState) -> dict[str, object]:
     verification = list(state.get("verification_findings") or state.get("last_verification_findings", []))
     review = list(state.get("review_findings") or state.get("last_review_findings", []))
     combined = [*verification, *review]
-    reason_parts = [
-        f"{item.get('code', 'UNKNOWN')}: {item.get('message', '')}".strip()
-        for item in combined
-    ]
+    reason_parts = [f"{item.get('code', 'UNKNOWN')}: {item.get('message', '')}".strip() for item in combined]
     last_failure_reason = "; ".join(part for part in reason_parts if part)
     if not last_failure_reason:
         last_failure_reason = state.get("last_failure_reason", "") or f"{status} after fix round {fix_round}."
@@ -195,13 +194,6 @@ def _after_fix(state: UIRebuildState) -> str:
 
 
 def _prepare_replan(state: UIRebuildState) -> dict[str, object]:
-    """Turn unresolved quality blockers into deterministic Planner feedback.
-
-    Fixer never gains permission to expand its own file scope. If a blocker cannot
-    be solved inside the approved plan, the graph gives Planner one bounded chance
-    to revise the plan. A new plan gets a fresh Fixer budget; plan_round bounds
-    scope evolution while fix_round bounds repairs inside one approved plan.
-    """
     verification = list(state.get("verification_findings") or state.get("last_verification_findings", []))
     review = list(state.get("review_findings") or state.get("last_review_findings", []))
     blockers = [*blocking_findings(verification), *blocking_findings(review)]
@@ -237,6 +229,7 @@ def _prepare_replan(state: UIRebuildState) -> dict[str, object]:
         "verification_findings": [],
         "review_findings": [],
         "fix_round": 0,
+        "resume_page_stage": "plan",
         "current_page_status": "replan_requested",
         "last_failure_reason": state.get("last_failure_reason", ""),
     }
@@ -248,6 +241,7 @@ def _add_safe_node(builder: StateGraph, name: str, node) -> None:
 
 def build_page_graph():
     builder = StateGraph(UIRebuildState)
+    _add_safe_node(builder, PAGE_NODE_ENTRY, _page_entry)
     _add_safe_node(builder, PAGE_NODE_CONTEXT, start_page_context)
     _add_safe_node(builder, PAGE_NODE_SCOUT, page_scout_node)
     _add_safe_node(builder, PAGE_NODE_PLANNER, planner_node)
@@ -264,13 +258,18 @@ def build_page_graph():
     _add_safe_node(builder, PAGE_NODE_FINALIZE_FIX, _finalize_fix)
     _add_safe_node(builder, PAGE_NODE_PREPARE_REPLAN, _prepare_replan)
 
-    builder.add_edge(START, PAGE_NODE_CONTEXT)
-    builder.add_edge(PAGE_NODE_CONTEXT, PAGE_NODE_SCOUT)
+    builder.add_edge(START, PAGE_NODE_ENTRY)
     builder.add_conditional_edges(
-        PAGE_NODE_SCOUT,
-        _after_scout,
-        {"规划": PAGE_NODE_PLANNER, "人工介入": END},
+        PAGE_NODE_ENTRY,
+        _after_page_entry,
+        {
+            "新页面": PAGE_NODE_CONTEXT,
+            "继续规划": PAGE_NODE_PLANNER,
+            "安全验证": PAGE_NODE_SCOPE_GUARD,
+        },
     )
+    builder.add_edge(PAGE_NODE_CONTEXT, PAGE_NODE_SCOUT)
+    builder.add_conditional_edges(PAGE_NODE_SCOUT, _after_scout, {"规划": PAGE_NODE_PLANNER, "人工介入": END})
     builder.add_edge(PAGE_NODE_PLANNER, PAGE_NODE_PLAN_GUARD)
     builder.add_conditional_edges(
         PAGE_NODE_PLAN_GUARD,
@@ -280,20 +279,12 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_BUILDER,
         _after_builder,
-        {
-            "范围检查": PAGE_NODE_SCOPE_GUARD,
-            "代码验证": PAGE_NODE_CODE_VERIFY,
-            "人工介入": END,
-        },
+        {"范围检查": PAGE_NODE_SCOPE_GUARD, "代码验证": PAGE_NODE_CODE_VERIFY, "人工介入": END},
     )
     builder.add_conditional_edges(
         PAGE_NODE_SCOPE_GUARD,
         _after_scope_guard,
-        {
-            "格式化": PAGE_NODE_FORMATTER,
-            "修复": PAGE_NODE_CAPTURE_FIX,
-            "重新规划": PAGE_NODE_PREPARE_REPLAN,
-        },
+        {"格式化": PAGE_NODE_FORMATTER, "修复": PAGE_NODE_CAPTURE_FIX, "重新规划": PAGE_NODE_PREPARE_REPLAN},
     )
     builder.add_conditional_edges(
         PAGE_NODE_FORMATTER,
@@ -303,42 +294,21 @@ def build_page_graph():
     builder.add_conditional_edges(
         PAGE_NODE_POST_FORMAT_SCOPE,
         _after_post_format_scope_guard,
-        {
-            "代码验证": PAGE_NODE_CODE_VERIFY,
-            "修复": PAGE_NODE_CAPTURE_FIX,
-            "重新规划": PAGE_NODE_PREPARE_REPLAN,
-        },
+        {"代码验证": PAGE_NODE_CODE_VERIFY, "修复": PAGE_NODE_CAPTURE_FIX, "重新规划": PAGE_NODE_PREPARE_REPLAN},
     )
-    builder.add_conditional_edges(
-        PAGE_NODE_CODE_VERIFY,
-        _after_code_verification,
-        {"现实验证": PAGE_NODE_REALITY, "修复": PAGE_NODE_CAPTURE_FIX},
-    )
-    builder.add_conditional_edges(
-        PAGE_NODE_REALITY,
-        _after_reality_anchor,
-        {"审查": PAGE_NODE_REVIEWER, "修复": PAGE_NODE_CAPTURE_FIX},
-    )
+    builder.add_conditional_edges(PAGE_NODE_CODE_VERIFY, _after_code_verification, {"现实验证": PAGE_NODE_REALITY, "修复": PAGE_NODE_CAPTURE_FIX})
+    builder.add_conditional_edges(PAGE_NODE_REALITY, _after_reality_anchor, {"审查": PAGE_NODE_REVIEWER, "修复": PAGE_NODE_CAPTURE_FIX})
     builder.add_conditional_edges(
         PAGE_NODE_REVIEWER,
         _after_review,
-        {
-            "完成": END,
-            "修复": PAGE_NODE_CAPTURE_FIX,
-            "重新规划": PAGE_NODE_PREPARE_REPLAN,
-            "人工介入": END,
-        },
+        {"完成": END, "修复": PAGE_NODE_CAPTURE_FIX, "重新规划": PAGE_NODE_PREPARE_REPLAN, "人工介入": END},
     )
     builder.add_edge(PAGE_NODE_CAPTURE_FIX, PAGE_NODE_FIXER)
     builder.add_edge(PAGE_NODE_FIXER, PAGE_NODE_FINALIZE_FIX)
     builder.add_conditional_edges(
         PAGE_NODE_FINALIZE_FIX,
         _after_fix,
-        {
-            "重新检查范围": PAGE_NODE_SCOPE_GUARD,
-            "重新规划": PAGE_NODE_PREPARE_REPLAN,
-            "人工介入": END,
-        },
+        {"重新检查范围": PAGE_NODE_SCOPE_GUARD, "重新规划": PAGE_NODE_PREPARE_REPLAN, "人工介入": END},
     )
     builder.add_edge(PAGE_NODE_PREPARE_REPLAN, PAGE_NODE_PLANNER)
     return builder.compile()

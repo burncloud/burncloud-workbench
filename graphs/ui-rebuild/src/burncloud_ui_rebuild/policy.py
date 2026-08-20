@@ -28,9 +28,9 @@ class HarnessPolicy:
     max_page_seconds: int = 2_400
     max_run_seconds: int = 7_200
     # A normal Studio run defaults to one page. Let that page use the full
-    # one-million-token graph budget rather than tripping an earlier page cap.
-    max_page_tokens: int = 1_000_000
-    max_run_tokens: int = 1_000_000
+    # five-million-token Graph budget rather than tripping an earlier page cap.
+    max_page_tokens: int = 5_000_000
+    max_run_tokens: int = 5_000_000
     max_agent_invocations_per_page: int = 12
 
     max_write_files_per_agent: int = 8
@@ -54,7 +54,7 @@ class HarnessPolicy:
     )
 
     # BurnCloud is a large Rust workspace. Keep per-role loop ceilings high enough
-    # for real repository exploration while retaining the one-million-token Graph
+    # for real repository exploration while retaining the five-million-token Graph
     # budget, wall-clock budgets, invocation budget and deterministic Graph edges as
     # the outer safety boundaries.
     scout_budget: AgentBudget = AgentBudget(max_model_calls=90, max_tool_calls=240)

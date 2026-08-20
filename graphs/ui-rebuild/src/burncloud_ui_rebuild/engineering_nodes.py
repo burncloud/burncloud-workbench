@@ -91,7 +91,8 @@ def initialize_run_context(state: UIRebuildState) -> dict[str, Any]:
         "base_branch": state.get("base_branch", "main"),
         "base_commit": state.get("base_commit", ""),
         "agent_branch": state.get("agent_branch", ""),
-        "worktree_root": state.get("worktree_root", ""),
+        "source_repo_root": state.get("source_repo_root", ""),
+        "branch_reused": bool(state.get("branch_reused", False)),
         "model_name": state.get("model_name", ""),
         "page_limit": state.get("page_limit", DEFAULT_POLICY.default_page_limit),
     }
@@ -103,7 +104,7 @@ def recovery_node(state: UIRebuildState) -> dict[str, Any]:
         return {"recovery_result": {"status": "dry_run"}}
     root = state.get("source_repo_root", "")
     if not root:
-        return {"recovery_result": {"status": "no_worktree"}}
+        return {"recovery_result": {"status": "no_source_repo"}}
 
     history = checkpoint_history(root)
     request = dict(state.get("recovery_request", {}))

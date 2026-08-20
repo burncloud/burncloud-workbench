@@ -11,6 +11,7 @@ from burncloud_ui_rebuild.worktree import (
     current_branch,
     head_commit,
     mark_agent_branch_completed,
+    migrate_legacy_agent_worktree,
     porcelain_status,
     prepare_agent_worktree,
 )
@@ -114,3 +115,25 @@ def test_prepare_agent_branch_refuses_unrelated_branch(tmp_path: Path):
 
     with pytest.raises(WorktreeError, match="unrelated branch"):
         prepare_agent_worktree(repo)
+
+
+def test_migrate_legacy_worktree_preserves_dirty_changes(tmp_path: Path):
+    repo = _repo(tmp_path)
+    legacy = tmp_path / "legacy-ui-rebuild"
+    branch = "agent/ui-rebuild/20260820-120000-1234abcd"
+    _git(repo, "worktree", "add", "-b", branch, str(legacy), "HEAD")
+
+    (legacy / "README.md").write_text("dirty legacy change\n", encoding="utf-8")
+    (legacy / "new-file.txt").write_text("untracked legacy file\n", encoding="utf-8")
+    assert porcelain_status(legacy)
+    assert current_branch(repo) == "main"
+
+    result = migrate_legacy_agent_worktree(repo)
+
+    assert result["status"] == "migrated"
+    assert result["agent_branch"] == branch
+    assert result["restored_dirty_changes"] is True
+    assert current_branch(repo) == branch
+    assert (repo / "README.md").read_text(encoding="utf-8") == "dirty legacy change\n"
+    assert (repo / "new-file.txt").read_text(encoding="utf-8") == "untracked legacy file\n"
+    assert not legacy.exists()
